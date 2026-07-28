@@ -1,0 +1,552 @@
+/* ========================================
+   MotionTrace Pro Ver.2 — グローバルスタイル
+   ======================================== */
+
+:root {
+  /* --- 背景カラーパレット --- */
+  --bg-primary: #080d1a;
+  --bg-secondary: #0f1728;
+  --bg-card: rgba(15, 23, 42, 0.75);
+  --bg-card-hover: rgba(30, 41, 59, 0.85);
+  --bg-input: rgba(15, 23, 42, 0.9);
+
+  /* --- ボーダー --- */
+  --border-color: rgba(255, 255, 255, 0.09);
+  --border-active: rgba(99, 102, 241, 0.55);
+  --border-subtle: rgba(255, 255, 255, 0.05);
+
+  /* --- テキスト --- */
+  --text-primary: #f0f4ff;
+  --text-secondary: #8b9bb4;
+  --text-muted: #4b5a72;
+
+  /* --- アクセントカラー --- */
+  --accent-primary: #6366f1;
+  --accent-hover: #4f46e5;
+  --accent-glow: rgba(99, 102, 241, 0.3);
+  --accent-secondary: #a855f7;
+
+  /* --- ステータスカラー --- */
+  --color-success: #10d97c;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --color-info: #38bdf8;
+
+  /* --- オブジェクト識別カラー (赤・青・緑・黄・紫) --- */
+  --obj-1: #ff3b30;
+  --obj-2: #0a84ff;
+  --obj-3: #30d158;
+  --obj-4: #ffd60a;
+  --obj-5: #bf5af2;
+
+  /* --- シャドウ --- */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 20px rgba(99, 102, 241, 0.2);
+
+  /* --- ボーダーラジアス --- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+}
+
+/* ========================================
+   リセット & ベーススタイル
+   ======================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.55;
+  overflow-x: hidden;
+  /* 背景グリッドパターン */
+  background-image:
+    radial-gradient(ellipse at 20% 10%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 80%, rgba(168, 85, 247, 0.06) 0%, transparent 50%),
+    linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+}
+
+/* ========================================
+   スクロールバー
+   ======================================== */
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.35); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.6); }
+
+/* ========================================
+   Glassmorphism パネル
+   ======================================== */
+
+.glass-panel {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-panel:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ========================================
+   ボタン
+   ======================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 16px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  user-select: none;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* Primary */
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+  color: #fff;
+  box-shadow: 0 2px 10px var(--accent-glow);
+  border-color: transparent;
+}
+.btn-primary:hover:not(:disabled) {
+  box-shadow: 0 4px 18px var(--accent-glow), 0 0 0 1px rgba(99, 102, 241, 0.4);
+  transform: translateY(-1px);
+  filter: brightness(1.1);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
+  filter: none;
+}
+
+/* Secondary */
+.btn-secondary {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Danger */
+.btn-danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.28);
+  border-color: rgba(239, 68, 68, 0.55);
+}
+
+/* Warning (校正モード中など) */
+.btn-warning {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fcd34d;
+  border-color: rgba(245, 158, 11, 0.45);
+}
+.btn-warning:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.3);
+}
+
+/* Small variant */
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  gap: 5px;
+}
+
+/* ========================================
+   バッジ
+   ======================================== */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ========================================
+   フォームコントロール
+   ======================================== */
+
+input[type="number"],
+input[type="text"],
+select {
+  font-family: inherit;
+  font-size: 0.875rem;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  outline: none;
+  width: 100%;
+}
+
+input[type="number"]:focus,
+input[type="text"]:focus,
+select:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+select option {
+  background: var(--bg-secondary);
+}
+
+input[type="range"] {
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+}
+
+/* ========================================
+   モノスペースフォント (数値表示用)
+   ======================================== */
+
+.mono {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+/* ========================================
+   レイアウト
+   ======================================== */
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.main-layout {
+  display: grid;
+  grid-template-columns: 1fr 390px;
+  gap: 20px;
+  padding: 20px;
+  flex: 1;
+  max-width: 1900px;
+  margin: 0 auto;
+  width: 100%;
+  align-items: start;
+}
+
+@media (max-width: 1200px) {
+  .main-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ========================================
+   セクションタイトル
+   ======================================== */
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+/* ========================================
+   アニメーション
+   ======================================== */
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes pulse-lost {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50%       { opacity: 0.8; box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(99, 102, 241, 0.3); }
+  50%       { box-shadow: 0 0 18px rgba(99, 102, 241, 0.6); }
+}
+
+.spin {
+  animation: spin 1.2s linear infinite;
+}
+
+.pulse-lost {
+  animation: pulse-lost 1.5s ease-in-out infinite;
+}
+
+.fade-in {
+  animation: fade-in 0.25s ease-out;
+}
+
+/* ========================================
+   ステータスドット
+   ======================================== */
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.tracking {
+  background: var(--color-success);
+  box-shadow: 0 0 6px var(--color-success);
+  animation: glow-pulse 2s ease-in-out infinite;
+}
+
+.status-dot.lost {
+  background: var(--color-danger);
+  box-shadow: 0 0 6px var(--color-danger);
+  animation: pulse-lost 1.5s ease-in-out infinite;
+}
+
+.status-dot.idle {
+  background: var(--text-muted);
+}
+
+/* 画面外へ退出して追尾を打ち切った状態 */
+.status-dot.exited {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.7);
+}
+
+/* ========================================
+   キーボードキー表示（校正ヒント用）
+   ======================================== */
+
+kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-color);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* ========================================
+   分割線
+   ======================================== */
+
+.divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 12px 0;
+}
+
+
+/* ========================================
+   グラフ概形（MotionGraph / GraphPanel）
+   ======================================== */
+
+.graph-wrap {
+  position: relative;
+  width: 100%;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* チップ（軸セレクタ・プリセット） */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  min-height: 28px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.chip:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.chip.is-active {
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  border-color: transparent;
+  color: #fff;
+}
+
+/* 軸セレクタの行 */
+.axis-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.axis-row__label {
+  flex-shrink: 0;
+  width: 34px;
+  font-size: 0.73rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.axis-row .chips {
+  flex: 1;
+  gap: 5px;
+}
+
+.axis-row .chip {
+  min-height: 26px;
+  padding: 3px 11px;
+  font-size: 0.74rem;
+}
+
+/* 凡例（物体の表示切替を兼ねる） */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.legend__item.is-off {
+  opacity: 0.4;
+}
+
+.legend__line {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+/* 全画面グラフ。形を見るときは大きいほうが判断しやすい */
+.graph-full {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 20px 20px;
+}
+
+.graph-full__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.graph-full .graph-wrap {
+  flex: 1 1 auto;
+  min-height: 160px;
+}
+
+.graph-full .axis-row,
+.graph-full .chips,
+.graph-full .legend {
+  flex-shrink: 0;
+}
