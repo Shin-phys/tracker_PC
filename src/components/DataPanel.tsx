@@ -12,6 +12,7 @@ import { TrackedObject, FrameData, FilterSettings, ScaleCalibration } from '../t
 import { applySavitzkyGolay } from '../utils/savitzkyGolay';
 import { autoFilter, butterworthZeroPhase, derivative, medianDt } from '../utils/butterworth';
 import { isCalibrated } from '../utils/calibration';
+import { smoothSeries } from '../utils/graphSmooth';
 import { GraphPanel } from './GraphPanel';
 import { AxisKey } from './MotionGraph';
 import {
@@ -37,6 +38,12 @@ interface DataPanelProps {
   onToggleGraphId: (id: string) => void;
   /** グラフ上をクリックしたとき、その時刻へ動画を移動させる */
   onSeek?: (t: number) => void;
+
+  /** グラフ表示だけにかける追加の平滑化（CSV には影響しない） */
+  graphSmooth: boolean;
+  graphSmoothWindow: number;
+  onChangeGraphSmooth: (on: boolean) => void;
+  onChangeGraphSmoothWindow: (w: number) => void;
 }
 
 export const DataPanel: React.FC<DataPanelProps> = ({
@@ -47,6 +54,7 @@ export const DataPanel: React.FC<DataPanelProps> = ({
   calibration,
   graphX, graphY, onChangeGraphX, onChangeGraphY,
   hiddenGraphIds, onToggleGraphId, onSeek,
+  graphSmooth, graphSmoothWindow, onChangeGraphSmooth, onChangeGraphSmoothWindow,
 }) => {
   const activeObjects = useMemo(() => objects.filter(o => o.active), [objects]);
   const [showFilterSettings, setShowFilterSettings] = useState(false);
@@ -153,6 +161,71 @@ export const DataPanel: React.FC<DataPanelProps> = ({
 
     return { processedData: copyData, report: { cutoffs, sampleRate } };
   }, [historyData, filterSettings, activeObjects]);
+
+  // -------------------------------------------------
+  // グラフ表示用の追加平滑化
+  // -------------------------------------------------
+  //
+  // 位置 x, y を移動平均で均し、速度は「均した位置」から中心差分で取り直す。
+  // 速度をそのまま平均すると、位置と速度が別々の量になってしまい
+  // 「この x-t の傾きがこの vx-t」という対応が崩れる。
+  //
+  // 平滑化するのはグラフに渡すデータだけで、
+  // processedData（CSV とリアルタイム表示の元）には手を触れない。
+
+  const graphData = useMemo(() => {
+    if (!graphSmooth || graphSmoothWindow < 5 || processedData.length === 0) {
+      return processedData;
+    }
+
+    const copy: FrameData[] = processedData.map(fd => ({
+      frameIndex: fd.frameIndex,
+      timestamp: fd.timestamp,
+      objects: Object.fromEntries(
+        Object.entries(fd.objects).map(([k, v]) => [k, { ...v }])
+      ),
+      distances: { ...fd.distances },
+    }));
+
+    activeObjects.forEach(obj => {
+      // 見失った区間をまたいで平均すると、追跡が飛んだ事実が均されて消える。
+      // 連続して追跡できているフレームの塊ごとに処理する。
+      let run: number[] = [];
+
+      const flush = () => {
+        // 窓より短い塊は smoothSeries が素通しするので、そのまま渡してよい
+        if (run.length >= 3) {
+          const t = run.map(i => copy[i].timestamp);
+          const sx = smoothSeries(
+            run.map(i => copy[i].objects[obj.id].xM), graphSmoothWindow
+          );
+          const sy = smoothSeries(
+            run.map(i => copy[i].objects[obj.id].yM), graphSmoothWindow
+          );
+          const vxs = derivative(sx, t);
+          const vys = derivative(sy, t);
+          run.forEach((fi, k) => {
+            const it = copy[fi].objects[obj.id];
+            it.xM = sx[k];
+            it.yM = sy[k];
+            it.vx = vxs[k];
+            it.vy = vys[k];
+            it.speedMs = Math.hypot(vxs[k], vys[k]);
+          });
+        }
+        run = [];
+      };
+
+      for (let i = 0; i < copy.length; i++) {
+        const it = copy[i].objects[obj.id];
+        if (it && !it.lost) run.push(i);
+        else flush();
+      }
+      flush();
+    });
+
+    return copy;
+  }, [processedData, graphSmooth, graphSmoothWindow, activeObjects]);
 
   // 最新フレームデータ
   const latestFrame = processedData.length > 0
@@ -279,7 +352,7 @@ export const DataPanel: React.FC<DataPanelProps> = ({
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           <GraphPanel
             objects={objects}
-            data={processedData}
+            data={graphData}
             unit={unitLabel}
             xKey={graphX}
             yKey={graphY}
@@ -288,6 +361,10 @@ export const DataPanel: React.FC<DataPanelProps> = ({
             hiddenIds={hiddenGraphIds}
             onToggleId={onToggleGraphId}
             onSeek={onSeek}
+            smooth={graphSmooth}
+            smoothWindow={graphSmoothWindow}
+            onChangeSmooth={onChangeGraphSmooth}
+            onChangeSmoothWindow={onChangeGraphSmoothWindow}
             height={210}
           />
           <div
@@ -299,7 +376,17 @@ export const DataPanel: React.FC<DataPanelProps> = ({
             vx-t / vy-t に鋭いスパイクが出ていたら、そこで追跡が飛んでいます。
             グラフをクリックするとその時刻へ動画が移動するので、
             映像側の「修正」ツールで点を直してください。
-            描いているのはフィルタ適用後の値、つまり CSV に出るのと同じ数字です。
+            {graphSmooth ? (
+              <>
+                {' '}
+                <span style={{ color: '#fcd34d' }}>
+                  いまは表示用の平滑化が入っているため、CSV に出る値とは一致しません。
+                  スパイクを探すときは OFF にしてください。
+                </span>
+              </>
+            ) : (
+              ' 描いているのはフィルタ適用後の値、つまり CSV に出るのと同じ数字です。'
+            )}
           </div>
         </div>
       </div>
@@ -314,6 +401,11 @@ export const DataPanel: React.FC<DataPanelProps> = ({
               <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 400 }}>
                 （{processedData.length} フレーム・単位 {unitLabel}）
               </span>
+              {graphSmooth && (
+                <span style={{ fontSize: '0.72rem', color: '#fcd34d', fontWeight: 700 }}>
+                  表示平滑化 {graphSmoothWindow} 点
+                </span>
+              )}
             </div>
             <button
               className="btn btn-secondary btn-sm"
@@ -326,7 +418,7 @@ export const DataPanel: React.FC<DataPanelProps> = ({
           </div>
           <GraphPanel
             objects={objects}
-            data={processedData}
+            data={graphData}
             unit={unitLabel}
             xKey={graphX}
             yKey={graphY}
@@ -335,6 +427,10 @@ export const DataPanel: React.FC<DataPanelProps> = ({
             hiddenIds={hiddenGraphIds}
             onToggleId={onToggleGraphId}
             onSeek={onSeek}
+            smooth={graphSmooth}
+            smoothWindow={graphSmoothWindow}
+            onChangeSmooth={onChangeGraphSmooth}
+            onChangeSmoothWindow={onChangeGraphSmoothWindow}
           />
         </div>
       )}

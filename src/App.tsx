@@ -15,6 +15,7 @@ import { VideoCanvas } from './components/VideoCanvas';
 import { ControlPanel } from './components/ControlPanel';
 import { DataPanel } from './components/DataPanel';
 import { AxisKey } from './components/MotionGraph';
+import { DEFAULT_SMOOTH_WINDOW } from './utils/graphSmooth';
 
 // -------------------------------------------------
 // 定数
@@ -110,6 +111,11 @@ export const App: React.FC = () => {
   const [graphX, setGraphX] = useState<AxisKey>('t');
   const [graphY, setGraphY] = useState<AxisKey>('x');
   const [hiddenGraphIds, setHiddenGraphIds] = useState<string[]>([]);
+  // グラフ表示だけにかける平滑化。既定は OFF。
+  // 既定を ON にすると、追跡が飛んだ箇所が均されて見えなくなり、
+  // このモード本来の目的（計測が使い物になるかの判断）を損なうため。
+  const [graphSmooth, setGraphSmooth] = useState(false);
+  const [graphSmoothWindow, setGraphSmoothWindow] = useState(DEFAULT_SMOOTH_WINDOW);
 
   /** グラフのクリックから動画をシークさせるための指示。
    *  同じ時刻を続けてクリックしても効くよう、連番を添えて渡す。 */
@@ -652,6 +658,10 @@ export const App: React.FC = () => {
             hiddenGraphIds={hiddenGraphIds}
             onToggleGraphId={toggleGraphId}
             onSeek={handleSeek}
+            graphSmooth={graphSmooth}
+            graphSmoothWindow={graphSmoothWindow}
+            onChangeGraphSmooth={setGraphSmooth}
+            onChangeGraphSmoothWindow={setGraphSmoothWindow}
           />
         </aside>
       </main>
