@@ -63,25 +63,46 @@ export const recalcScale = (
  */
 export const toReal = (calib: ScaleCalibration, p: Point, imageHeight = 0): Point => {
   if (calib.mode === 'plane' && calib.homography) {
-    return applyHomography(calib.homography as Matrix3, p);
+    const Hm = calib.homography as Matrix3;
+    const q = applyHomography(Hm, p);
+    if (!calib.origin) return q;
+    // plane モードでは、原点も同じ射影変換で実寸へ移してから引く。
+    // 画像座標のまま引くと、遠近のかかり方が場所ごとに違うので合わない。
+    const o = applyHomography(Hm, calib.origin);
+    return { x: q.x - o.x, y: q.y - o.y };
   }
   const s = calib.pxPerUnit > 0 ? calib.pxPerUnit : 1;
-  const x = p.x / s;
-  // yUp のときは画像の下端を原点にして上向きを正にする
-  const y = calib.yUp && imageHeight > 0 ? (imageHeight - p.y) / s : p.y / s;
-  return { x, y };
+  // 原点が未設定なら従来どおり画像の左上（yUp なら左下）を基準にする
+  const ox = calib.origin ? calib.origin.x : 0;
+  const oy = calib.origin
+    ? calib.origin.y
+    : (calib.yUp && imageHeight > 0 ? imageHeight : 0);
+  return {
+    x: (p.x - ox) / s,
+    // yUp のときは上向きが正になるよう向きを反転する
+    y: calib.yUp ? (oy - p.y) / s : (p.y - oy) / s,
+  };
 };
 
 /** 実寸座標 → 画像座標（校正の検証表示などに使う） */
 export const toImage = (calib: ScaleCalibration, p: Point, imageHeight = 0): Point | null => {
   if (calib.mode === 'plane' && calib.homography) {
-    const inv = invertHomography(calib.homography as Matrix3);
-    return inv ? applyHomography(inv, p) : null;
+    const Hm = calib.homography as Matrix3;
+    const inv = invertHomography(Hm);
+    if (!inv) return null;
+    const o = calib.origin
+      ? applyHomography(Hm, calib.origin)
+      : { x: 0, y: 0 };
+    return applyHomography(inv, { x: p.x + o.x, y: p.y + o.y });
   }
   const s = calib.pxPerUnit > 0 ? calib.pxPerUnit : 1;
+  const ox = calib.origin ? calib.origin.x : 0;
+  const oy = calib.origin
+    ? calib.origin.y
+    : (calib.yUp && imageHeight > 0 ? imageHeight : 0);
   return {
-    x: p.x * s,
-    y: calib.yUp && imageHeight > 0 ? imageHeight - p.y * s : p.y * s,
+    x: p.x * s + ox,
+    y: calib.yUp ? oy - p.y * s : p.y * s + oy,
   };
 };
 

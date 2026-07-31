@@ -2,6 +2,7 @@
 import React from 'react';
 import { Target, Activity, CheckCircle2, Loader2, Cpu, AlertTriangle } from 'lucide-react';
 import { FpsSettings } from '../types';
+import { isTimeScaled, timeScale } from '../utils/timeScale';
 
 interface HeaderProps {
   isOpenCVReady: boolean;
@@ -136,20 +137,28 @@ export const Header: React.FC<HeaderProps> = ({
             <span
               className="badge mono"
               style={{
-                background:
-                  fpsSettings.source === 'auto'
-                    ? 'rgba(16, 217, 124, 0.12)'
-                    : 'rgba(255, 255, 255, 0.07)',
-                color:
-                  fpsSettings.source === 'auto' ? '#10d97c' : 'var(--text-primary)',
-                border:
-                  fpsSettings.source === 'auto'
-                    ? '1px solid rgba(16, 217, 124, 0.3)'
-                    : '1px solid var(--border-color)',
+                background: 'rgba(16, 217, 124, 0.12)',
+                color: '#10d97c',
+                border: '1px solid rgba(16, 217, 124, 0.3)',
               }}
             >
-              {fpsSettings.value.toFixed(2)} {fpsSettings.source === 'auto' ? '(auto)' : '(manual)'}
+              {fpsSettings.value.toFixed(2)} (auto)
             </span>
+            {/* スロー動画で時間軸を換算しているときは、それが一目で分かるようにする。
+                気づかないまま速度を読むと 1/8 の値を信じてしまう */}
+            {isTimeScaled(fpsSettings) && (
+              <span
+                className="badge mono"
+                style={{
+                  background: 'rgba(252, 211, 77, 0.12)',
+                  color: '#fcd34d',
+                  border: '1px solid rgba(252, 211, 77, 0.3)',
+                }}
+                title={`撮影 ${fpsSettings.captureFps} fps として実時間に換算しています`}
+              >
+                実時間 ×{timeScale(fpsSettings).toFixed(3)}
+              </span>
+            )}
           </div>
 
           {/* 記録フレーム数 */}

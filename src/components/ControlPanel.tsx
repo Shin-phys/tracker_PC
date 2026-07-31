@@ -23,6 +23,7 @@ import {
   isCalibrated as calibDone, scaleVariation,
 } from '../utils/calibration';
 import { RECOMMENDED_ROI_SIZE } from '../utils/tracker';
+import { CAPTURE_FPS_PRESETS, describeTimeScale, isTimeScaled } from '../utils/timeScale';
 import {
   Layers, Plus, Trash2, RefreshCw, Ruler,
   AlertTriangle, CheckCircle, Timer, Crosshair, LogOut, Settings2, RotateCcw,
@@ -631,53 +632,108 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             style={{ width: 14, height: 14, accentColor: 'var(--accent-primary)' }} />
           Y軸を上向きにする（物理の座標系に合わせる）
         </label>
+
+        {/* 原点。指定は映像側の「原点」ボタンで行う */}
+        <div style={{
+          marginTop: '8px', fontSize: '0.75rem', lineHeight: 1.6,
+          background: 'rgba(255,255,255,0.03)', padding: '7px 10px',
+          borderRadius: '6px', border: '1px solid var(--border-color)',
+          color: 'var(--text-muted)',
+        }}>
+          原点:{' '}
+          {calibration.origin ? (
+            <span className="mono" style={{ color: '#fcd34d', fontWeight: 700 }}>
+              ({calibration.origin.x}, {calibration.origin.y}) px
+            </span>
+          ) : (
+            <span>画像の{calibration.yUp ? '左下' : '左上'}（既定）</span>
+          )}
+          <div style={{ marginTop: 3 }}>
+            映像の下にある「原点」ボタンから、斜面の始点などを原点にできます。
+            CSV の x, y がその点からの値になります。
+          </div>
+        </div>
       </div>
 
       {/* ========================================
-          3. FPS 設定
+          3. フレームレートと時間軸
           ======================================== */}
       <div className="glass-panel" style={{ padding: '16px' }}>
         <div className="section-title" style={{ marginBottom: '12px' }}>
           <Timer size={17} color="var(--accent-primary)" />
-          FPS 設定
+          フレームレートと時間軸
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.03)', padding: '7px 10px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
-            ソース:{' '}
-            <span style={{ fontWeight: 600, color: fpsSettings.source === 'auto' ? 'var(--color-success)' : 'var(--text-primary)' }}>
-              {fpsSettings.source === 'auto'
-                ? `自動計測 — 再生中に実フレーム間隔から更新されます (現在 ${fpsSettings.value.toFixed(2)} fps)`
-                : '手動入力（自動計測は行いません）'}
-            </span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {/* ---- ファイルfps（自動計測・編集不可） ---- */}
+          <div style={{
+            fontSize: '0.78rem', color: 'var(--text-secondary)',
+            background: 'rgba(255,255,255,0.03)', padding: '8px 10px',
+            borderRadius: '6px', border: '1px solid var(--border-color)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>ファイルのfps（自動計測）</span>
+              <span className="mono" style={{ color: 'var(--color-success)', fontWeight: 700 }}>
+                {fpsSettings.value.toFixed(2)} fps
+              </span>
+            </div>
             <div style={{ marginTop: 4, color: 'var(--text-muted)', fontSize: '0.72rem', lineHeight: 1.6 }}>
-              ※ 速度計算には動画本来のタイムスタンプ（mediaTime）を直接使うため、
-              この FPS 値がずれていても速度の精度には影響しません。コマ送りの刻み幅と表示に使われます。
+              再生すると実フレーム間隔から自動で決まります。コマ送りの刻み幅に使われます。
             </div>
           </div>
 
+          {/* ---- 撮影fps（実時間の基準） ---- */}
           <div>
             <label style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>
-              FPS 値:
+              撮影fps（スロー動画のときに指定）
             </label>
-            <input type="number" step="0.001" min="1" max="1000"
-              value={fpsSettings.value}
+            <input type="number" step="1" min="0" max="2000"
+              value={fpsSettings.captureFps || ''}
+              placeholder="未指定（通常の動画）"
               onFocus={e => e.currentTarget.select()}
               onChange={e => {
                 const v = parseFloat(e.target.value);
-                if (v > 0) onUpdateFpsSettings({ value: v, source: 'manual' });
+                onUpdateFpsSettings({
+                  ...fpsSettings,
+                  captureFps: isFinite(v) && v > 0 ? v : 0,
+                });
               }} />
+
+            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
+              <button
+                className={`btn btn-sm ${!fpsSettings.captureFps ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => onUpdateFpsSettings({ ...fpsSettings, captureFps: 0 })}
+                style={{ fontSize: '0.75rem', padding: '3px 8px' }}>
+                通常
+              </button>
+              {CAPTURE_FPS_PRESETS.map(f => (
+                <button key={f}
+                  className={`btn btn-sm ${Math.abs(fpsSettings.captureFps - f) < 0.01 ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => onUpdateFpsSettings({ ...fpsSettings, captureFps: f })}
+                  style={{ fontSize: '0.75rem', padding: '3px 8px' }}>
+                  {f}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-            {[24, 25, 30, 60, 120, 240].map(f => (
-              <button key={f}
-                className={`btn btn-sm ${Math.abs(fpsSettings.value - f) < 0.01 ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => onUpdateFpsSettings({ value: f, source: 'manual' })}
-                style={{ fontSize: '0.75rem', padding: '3px 8px' }}>
-                {f}
-              </button>
-            ))}
+          {/* ---- 換算結果 ---- */}
+          <div style={{
+            fontSize: '0.76rem', lineHeight: 1.6,
+            background: isTimeScaled(fpsSettings)
+              ? 'rgba(252,211,77,0.08)' : 'rgba(255,255,255,0.03)',
+            border: isTimeScaled(fpsSettings)
+              ? '1px solid rgba(252,211,77,0.3)' : '1px solid var(--border-color)',
+            padding: '8px 10px', borderRadius: '6px',
+            color: isTimeScaled(fpsSettings) ? '#fcd34d' : 'var(--text-muted)',
+          }}>
+            時間軸: <span className="mono" style={{ fontWeight: 700 }}>
+              {describeTimeScale(fpsSettings)}
+            </span>
+            <div style={{ marginTop: 4, color: 'var(--text-muted)', fontSize: '0.72rem' }}>
+              240fps で撮って 30fps で書き出したスロー動画なら「撮影fps = 240」。
+              グラフと CSV の時刻・速度がこの倍率で実時間に直されます。
+            </div>
           </div>
         </div>
       </div>

@@ -9,12 +9,14 @@ import { waitForOpenCV } from './utils/opencvLoader';
 import { ObjectTracker, MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE } from './utils/tracker';
 import { FrameSource } from './utils/frameSource';
 import { toReal } from './utils/calibration';
+import { medianDt } from './utils/butterworth';
 
 import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
 import { ControlPanel } from './components/ControlPanel';
 import { DataPanel } from './components/DataPanel';
 import { AxisKey } from './components/MotionGraph';
+import { DEFAULT_SMOOTH_WINDOW } from './utils/graphSmooth';
 
 // -------------------------------------------------
 // 定数
@@ -69,6 +71,7 @@ export const App: React.FC = () => {
     planeHeight: 21,
     homography: null,
     yUp: true,
+    origin: null,
   });
 
   // ---- 追跡設定 ----
@@ -86,11 +89,11 @@ export const App: React.FC = () => {
 
   // ---- 再生・FPS ----
   const [isPlaying, setIsPlaying] = useState(false);
-  // source: 'auto' の間は、再生中に実フレーム間隔から自動計測して上書きされる。
-  // ユーザーが手入力した時点で 'manual' に固定される。
+  // value（ファイルfps）は再生中に実フレーム間隔から自動計測して上書きされる。
+  // captureFps はユーザー入力で、0 は「通常の動画」＝時間軸の換算なし。
   const [fpsSettings, setFpsSettings] = useState<FpsSettings>({
     value: 30,
-    source: 'auto',
+    captureFps: 0,
   });
 
   // ---- 記録データ ----
@@ -110,6 +113,11 @@ export const App: React.FC = () => {
   const [graphX, setGraphX] = useState<AxisKey>('t');
   const [graphY, setGraphY] = useState<AxisKey>('x');
   const [hiddenGraphIds, setHiddenGraphIds] = useState<string[]>([]);
+  // グラフ表示だけにかける平滑化。既定は OFF。
+  // 既定を ON にすると、追跡が飛んだ箇所が均されて見えなくなり、
+  // このモード本来の目的（計測が使い物になるかの判断）を損なうため。
+  const [graphSmooth, setGraphSmooth] = useState(false);
+  const [graphSmoothWindow, setGraphSmoothWindow] = useState(DEFAULT_SMOOTH_WINDOW);
 
   /** グラフのクリックから動画をシークさせるための指示。
    *  同じ時刻を続けてクリックしても効くよう、連番を添えて渡す。 */
@@ -289,9 +297,12 @@ export const App: React.FC = () => {
    *   ・記録済みデータのうち、現在時刻に最も近いフレームの座標を書き換える
    *   ・その位置でトラッカーを作り直すので、続きから追跡し直せる
    * 自動追跡がまれに外れたときに、データを捨てずに救済するための機能。
+   *
+   * @returns 記録データを実際に書き換えられたか。
+   *   false のときは枠だけが動いた状態なので、呼び出し側で知らせる必要がある。
    */
   const handleManualCorrect = useCallback(
-    (objId: string, center: Point, timestamp: number, videoEl?: HTMLVideoElement) => {
+    (objId: string, center: Point, timestamp: number, videoEl?: HTMLVideoElement): boolean => {
       const obj = objectsRef.current.find(o => o.id === objId);
       const size = obj?.roi
         ? { w: obj.roi.width, h: obj.roi.height }
@@ -320,6 +331,7 @@ export const App: React.FC = () => {
       }
 
       // --- 記録データの該当フレームを書き換える ---
+      let applied = false;
       const hist = historyDataRef.current;
       if (hist.length > 0) {
         let bestIdx = 0;
@@ -331,8 +343,14 @@ export const App: React.FC = () => {
             bestIdx = i;
           }
         }
-        // 1フレーム分以上離れていたら別の時刻とみなして書き換えない
-        const tol = 1 / Math.max(1, fpsSettings.value);
+        // 許容差は「実際に記録されている間隔」から出す。
+        // 以前は 1/fpsSettings.value を使っていたが、これだと
+        // スロー動画で撮影 fps（240 など）を手入力したときに
+        // 許容差が実間隔よりずっと狭くなり、書き換えが黙って失敗していた。
+        // （最近傍フレームまでの距離は最大で間隔の半分なので 0.75 倍で足りる）
+        const recordedDt = medianDt(hist.map(f => f.timestamp));
+        const tol =
+          (recordedDt > 0 ? recordedDt : 1 / Math.max(1, fpsSettings.value)) * 0.75;
         if (bestDiff <= tol) {
           const fd = hist[bestIdx];
           const item = fd.objects[objId];
@@ -352,6 +370,7 @@ export const App: React.FC = () => {
             };
           }
           flushHistory(true);
+          applied = true;
         }
       }
 
@@ -362,6 +381,8 @@ export const App: React.FC = () => {
             : o
         )
       );
+
+      return applied;
     },
     [cvReady, getFrameSource, flushHistory, fpsSettings.value]
   );
@@ -645,6 +666,7 @@ export const App: React.FC = () => {
             filterSettings={filterSettings}
             onUpdateFilterSettings={setFilterSettings}
             calibration={calibration}
+            fpsSettings={fpsSettings}
             graphX={graphX}
             graphY={graphY}
             onChangeGraphX={setGraphX}
@@ -652,6 +674,10 @@ export const App: React.FC = () => {
             hiddenGraphIds={hiddenGraphIds}
             onToggleGraphId={toggleGraphId}
             onSeek={handleSeek}
+            graphSmooth={graphSmooth}
+            graphSmoothWindow={graphSmoothWindow}
+            onChangeGraphSmooth={setGraphSmooth}
+            onChangeGraphSmoothWindow={setGraphSmoothWindow}
           />
         </aside>
       </main>

@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "sync:core": "node scripts/sync-core.mjs",
+    "sync:core:check": "node scripts/sync-core.mjs --check"
   },
   "dependencies": {
     "@techstark/opencv-js": "^5.0.0-release.1",
