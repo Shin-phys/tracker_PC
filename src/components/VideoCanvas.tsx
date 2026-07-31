@@ -24,7 +24,7 @@
 //  ④ 画面外に出た物体は 'exited' として表示し、軌跡もそこで終端する。
 // ============================================================
 
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
   TrackedObject, ScaleCalibration, Rect, Point, FrameData, FpsSettings
 } from '../types';
@@ -32,9 +32,15 @@ import { recalcScale, pixelDistance } from '../utils/calibration';
 import { applyHomography, invertHomography, Matrix3 } from '../utils/homography';
 import { MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE } from '../utils/tracker';
 import { stepFrames, probeFileFps, seekToFrameTime } from '../utils/videoFrame';
+import { medianDt } from '../utils/butterworth';
+import {
+  nextManualTarget, countManualPoints, manualStepInterval,
+  recommendManualStep, MANUAL_INTERVAL_WARN,
+} from '../utils/manualTrack';
+import { timeScale } from '../utils/timeScale';
 import {
   Play, Pause, RotateCcw, Upload, Crosshair, ZoomIn, ZoomOut,
-  Eraser, ChevronLeft, ChevronRight, Gauge, Hand
+  Eraser, ChevronLeft, ChevronRight, Gauge, Hand, MousePointerClick, Undo2
 } from 'lucide-react';
 
 interface VideoCanvasProps {
@@ -44,6 +50,10 @@ interface VideoCanvasProps {
   onUpdateRoi: (id: string, roi: Rect, videoEl?: HTMLVideoElement) => void;
   /** 追跡点を手で直す。記録データを書き換えられたかを返す */
   onManualCorrect: (id: string, center: Point, timestamp: number, videoEl?: HTMLVideoElement) => boolean;
+  /** 手動トラッキングで 1 点打つ。そのコマを打ち切ったら true */
+  onManualPlace: (id: string, center: Point, fileTime: number) => boolean;
+  /** 手動トラッキングの直前の 1 点を取り消す */
+  onManualUndo: () => boolean;
   calibration: ScaleCalibration;
   onUpdateCalibration: (calib: ScaleCalibration) => void;
   onProcessFrame: (videoEl: HTMLVideoElement, timestamp: number, frameIndex: number) => void;
@@ -76,7 +86,7 @@ type DragMode =
 const PLAYBACK_RATES = [0.25, 0.5, 1];
 
 export const VideoCanvas: React.FC<VideoCanvasProps> = ({
-  objects, selectedObjId, onUpdateRoi, onManualCorrect,
+  objects, selectedObjId, onUpdateRoi, onManualCorrect, onManualPlace, onManualUndo,
   calibration, onUpdateCalibration, onProcessFrame,
   historyData, onResetData, onClearTrail, isPlaying, setIsPlaying,
   fpsSettings, setFpsSettings,
@@ -113,6 +123,22 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const steppingRef = useRef(false);
   /** 原点指定モード（ON のあいだ、クリックした点が座標の原点になる） */
   const [originMode, setOriginMode] = useState(false);
+
+  // ---- 手動トラッキング ----
+  /** ON のあいだ、クリックした位置が「その物体のその時刻の位置」になる */
+  const [manualMode, setManualMode] = useState(false);
+  /** 1 回打ったあとに進めるコマ数 */
+  const [manualStep, setManualStep] = useState(1);
+  /** ユーザーが自分でコマ数を決めたか（決めていれば自動で上書きしない） */
+  const manualStepTouched = useRef(false);
+  /** 操作の結果を伝える一言 */
+  const [manualMsg, setManualMsg] = useState<string | null>(null);
+  /**
+   * 次に打つ物体をユーザーが指名した場合の id。
+   * null なら自動の順番（そのコマでまだ打っていない先頭）に従う。
+   * 打ち間違えたときや、見えている物体から先に打ちたいときのための逃げ道。
+   */
+  const [manualPick, setManualPick] = useState<string | null>(null);
   /** 修正モードの操作結果を伝える一言（成功／記録なし） */
   const [correctMsg, setCorrectMsg] = useState<string | null>(null);
   /** 手動修正モード（ON のときだけ点をドラッグして直せる） */
@@ -165,6 +191,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     setIsLineCalibrating(false);
     setOriginMode(false);
     setCorrectMode(false);
+    setManualMode(false);
     e.target.value = '';
   };
 
@@ -329,9 +356,83 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
   useEffect(() => { if (!correctMode) setCorrectMsg(null); }, [correctMode]);
 
+  // -------------------------------------------------
+  // 手動トラッキング
+  // -------------------------------------------------
+
+  /** 同じコマとみなす時刻の許容差。App 側と同じ基準にそろえる */
+  const frameTolerance = useMemo(() => {
+    const dt = historyData.length > 1
+      ? medianDt(historyData.map(f => f.timestamp))
+      : 0;
+    return (dt > 0 ? dt : 1 / Math.max(1, fpsSettings.value)) * 0.5;
+  }, [historyData, fpsSettings.value]);
+
+  /** 「n コマおき」が実時間で何秒になるか。加速度の精度はここで決まる */
+  const manualInterval = manualStepInterval(
+    manualStep, fpsSettings.value, timeScale(fpsSettings)
+  );
+
+  // fps や撮影fps が決まったら、間隔が適切になるコマ数を提案する。
+  // 240fps スローで 1 コマおきに打つと実時間 4ms しか空かず、
+  // 加速度のばらつきが 40% にもなる（合成データでの実測）。
+  useEffect(() => {
+    if (manualStepTouched.current) return;
+    setManualStep(recommendManualStep(fpsSettings.value, timeScale(fpsSettings)));
+  }, [fpsSettings]);
+
+  /** 打つ対象の並び。表示されている順に一巡させる */
+  const manualOrder = objects.filter(o => o.active).map(o => o.id);
+
+  /** いま打つべき物体と、それがそのコマの最後かどうか */
+  const manualTarget = nextManualTarget(
+    historyData, manualOrder, frameTimeRef.current, frameTolerance
+  );
+
+  /**
+   * 1 点打つ。そのコマの対象を打ち切ったら、続けて manualStep コマ進む。
+   * 記録する時刻は「要求した時刻」ではなく、実際に表示されているフレームの時刻。
+   *
+   * 「打ち切ったか」は onManualPlace の戻り値で判断する。
+   * 打つ順番を入れ替えられるので、打つ前には決められない。
+   */
+  const placeManualAt = useCallback(async (pt: Point) => {
+    const objId = manualPick ?? manualTarget.objId;
+    if (!objId) {
+      setManualMsg('追跡対象がありません');
+      return;
+    }
+    const complete = onManualPlace(objId, pt, frameTimeRef.current);
+    // 指名は 1 回きり。打ったら自動の順番に戻す
+    setManualPick(null);
+
+    if (complete) {
+      setManualMsg(`${objId} を記録 → ${manualStep} コマ進みます`);
+      await stepFrame(manualStep);
+    } else {
+      setManualMsg(`${objId} を記録`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manualPick, manualTarget.objId, onManualPlace, manualStep]);
+
+  /** 操作結果の表示は少し経ったら消す */
+  useEffect(() => {
+    if (!manualMsg) return;
+    const id = window.setTimeout(() => setManualMsg(null), 2000);
+    return () => window.clearTimeout(id);
+  }, [manualMsg]);
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!videoLoaded) return;
     const pt = getCanvasCoordinates(e);
+
+    // ---------- 手動トラッキング ----------
+    // 原点指定の次に見る。1 クリックで 1 点打ち、そのコマの物体を打ち切ったら
+    // 自動で次のコマへ進む。ドラッグ判定は挟まない（打つのは点であって領域ではない）
+    if (manualMode && !isPlaying && !originMode) {
+      void placeManualAt(pt);
+      return;
+    }
 
     // ---------- 原点指定 ----------
     // 他のどのモードよりも先に見る。1 クリックで確定して自分で抜ける。
@@ -855,6 +956,34 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       }
     }
 
+    // ----- 手動記録: 次に打つ物体を示す -----
+    // どの物体を打つ番か分からなくなるのが一番の混乱なので、
+    // 現在のコマに既に打ってある点を色付きで示し、次の対象を強調する。
+    if (manualMode && !isPlaying) {
+      const cur = historyData.find(
+        f => Math.abs(f.timestamp - frameTimeRef.current) <= frameTolerance
+      );
+      objects.filter(o => o.active).forEach(o => {
+        const it = cur?.objects[o.id];
+        if (!it || it.lost) return;
+        ctx.beginPath();
+        ctx.arc(it.xPx, it.yPx, 7 * k, 0, Math.PI * 2);
+        ctx.fillStyle = o.color;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 2 * k;
+        ctx.stroke();
+        ctx.font = `bold ${11 * k}px Inter, sans-serif`;
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+        ctx.lineWidth = 3 * k;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.strokeText(o.id, it.xPx + 10 * k, it.yPx);
+        ctx.fillText(o.id, it.xPx + 10 * k, it.yPx);
+      });
+    }
+
     // ----- 原点 -----
     // 指定されているときだけ描く。未指定なら従来どおり画像の隅が原点で、
     // そこに印を出しても情報量がないため。
@@ -922,7 +1051,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     historyData, objects, selectedObjId, showTrail,
     dragMode, dragStart, dragCurrent, isSquareMode, calibration,
     correctMode, isPlaying, manualObjId, nearestFrameIndex, grabPoint,
-    originMode,
+    originMode, manualMode, frameTolerance,
   ]);
 
   renderRef.current = renderFrame;
@@ -1093,7 +1222,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   // -------------------------------------------------
 
   const cursorStyle =
-    originMode ? 'crosshair'
+    originMode || (manualMode && !isPlaying) ? 'crosshair'
       : isLineCalibrating || dragMode === 'calib-new' ? 'crosshair'
       : dragMode === 'calib-p1' || dragMode === 'calib-p2' || dragMode === 'plane-corner' ? 'grabbing'
         : dragMode === 'manual' ? 'grabbing'
@@ -1221,6 +1350,23 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           </div>
         )}
 
+        {manualMode && !originMode && (
+          <div style={{
+            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(10,132,255,0.95)', color: '#fff', padding: '7px 16px',
+            borderRadius: 20, fontSize: '0.82rem', fontWeight: 700, pointerEvents: 'none',
+            whiteSpace: 'nowrap', boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
+          }}>
+            {manualMsg ?? (
+              (manualPick ?? manualTarget.objId)
+                ? `👆 ${manualPick ?? manualTarget.objId} の位置をクリック${
+                    manualPick ? '（指名中）' : ''
+                  }`
+                : '追跡対象がありません'
+            )}
+          </div>
+        )}
+
         {originMode && (
           <div style={{
             position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
@@ -1283,6 +1429,22 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           </button>
 
           <button
+            className={`btn btn-sm ${manualMode ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => {
+              setManualMode(v => !v);
+              setCorrectMode(false);
+              setOriginMode(false);
+              setIsLineCalibrating(false);
+              const v = videoRef.current;
+              if (v) { v.pause(); setIsPlaying(false); }
+            }}
+            disabled={!videoLoaded}
+            title="コマごとに対象をクリックして手で記録します（自動追跡が効かない対象向け）">
+            <MousePointerClick size={14} />
+            手動記録
+          </button>
+
+          <button
             className={`btn btn-sm ${originMode ? 'btn-warning' : 'btn-secondary'}`}
             onClick={() => {
               setOriginMode(v => !v);
@@ -1303,6 +1465,100 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
               <Eraser size={14} />
               原点解除
             </button>
+          )}
+
+          {manualMode && manualOrder.length > 1 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '5px',
+              fontSize: '0.75rem', color: 'var(--text-secondary)',
+            }}>
+              <span>次に打つ</span>
+              {objects.filter(o => o.active).map(o => {
+                const isNext = (manualPick ?? manualTarget.objId) === o.id;
+                // そのコマで既に打ってあるかを出す（打ち直しか新規かが分かる）
+                const cur = historyData.find(
+                  f => Math.abs(f.timestamp - frameTimeRef.current) <= frameTolerance
+                );
+                const done = !!cur?.objects[o.id]?.manual;
+                return (
+                  <button
+                    key={o.id}
+                    onClick={() => setManualPick(o.id)}
+                    title={done ? `${o.id} はこのコマで記録済み（押すと打ち直し）` : `${o.id} を次に打つ`}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 4,
+                      padding: '3px 9px', borderRadius: 7, cursor: 'pointer',
+                      fontSize: '0.73rem', fontWeight: 700,
+                      background: isNext ? o.color : 'rgba(255,255,255,0.06)',
+                      color: isNext ? '#fff' : 'var(--text-secondary)',
+                      border: `1px solid ${isNext ? o.color : 'var(--border-color)'}`,
+                      opacity: done && !isNext ? 0.55 : 1,
+                    }}
+                  >
+                    <span style={{
+                      width: 7, height: 7, borderRadius: '50%',
+                      background: isNext ? '#fff' : o.color,
+                    }} />
+                    {o.id}
+                    {done && <span style={{ fontSize: '0.68rem' }}>✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {manualMode && (
+            <>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                fontSize: '0.75rem', color: 'var(--text-secondary)',
+                background: 'rgba(10,132,255,0.1)', border: '1px solid rgba(10,132,255,0.3)',
+                padding: '3px 9px', borderRadius: '7px',
+              }}>
+                <span>コマ送り</span>
+                <input
+                  type="range" min={1} max={30} step={1} value={manualStep}
+                  onChange={e => {
+                    manualStepTouched.current = true;
+                    setManualStep(parseInt(e.target.value));
+                  }}
+                  style={{ width: 90 }}
+                  title="1 回打つごとに進めるコマ数。詰めすぎると加速度のばらつきが増える"
+                />
+                {/* 実時間の間隔を出す。加速度の精度はここでほぼ決まるので、
+                    コマ数だけ見せても判断できない */}
+                <span
+                  className="mono"
+                  style={{
+                    fontWeight: 700, minWidth: 76,
+                    color: manualInterval < MANUAL_INTERVAL_WARN
+                      ? '#fcd34d' : 'var(--text-primary)',
+                  }}
+                  title={
+                    manualInterval < MANUAL_INTERVAL_WARN
+                      ? '間隔が短すぎます。加速度は位置を2回微分するため、'
+                        + 'クリックのぶれが 1/Δt² で拡大されます'
+                      : ''
+                  }
+                >
+                  {manualStep} コマ / {(manualInterval * 1000).toFixed(0)} ms
+                </span>
+              </div>
+
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  setManualMsg(onManualUndo() ? '直前の 1 点を取り消しました' : '取り消せる点がありません');
+                }}
+                title="直前に打った点を取り消します">
+                <Undo2 size={14} />
+                取り消し
+              </button>
+
+              <span className="mono" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                手動 {countManualPoints(historyData)} 点
+              </span>
+            </>
           )}
 
           <button className="btn btn-secondary" onClick={handleReset} disabled={!videoLoaded} title="先頭に戻して軌跡を消去（枠は保持）">
