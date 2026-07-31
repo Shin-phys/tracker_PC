@@ -12,7 +12,9 @@ import {
   TrackedObject, FrameData, FilterSettings, ScaleCalibration, FpsSettings,
 } from '../types';
 import { timeScale, isTimeScaled, toFileTime } from '../utils/timeScale';
-import { applySavitzkyGolay } from '../utils/savitzkyGolay';
+import {
+  applySavitzkyGolay, sgWindowSeconds, recommendSgWindow, SG_WINDOW_WARN_SEC,
+} from '../utils/savitzkyGolay';
 import { autoFilter, butterworthZeroPhase, derivative, medianDt } from '../utils/butterworth';
 import { isCalibrated } from '../utils/calibration';
 import { smoothSeries } from '../utils/graphSmooth';
@@ -794,6 +796,36 @@ export const DataPanel: React.FC<DataPanelProps> = ({
                     <option value={15}>15 pts</option>
                   </select>
                 </div>
+
+                {/* 点数だけでは判断できない。効くかどうかは「時間として何ms均すか」で決まる */}
+                {report.sampleRate > 0 && (() => {
+                  const sec = sgWindowSeconds(filterSettings.windowSize, report.sampleRate);
+                  const tooWide = sec > SG_WINDOW_WARN_SEC;
+                  const rec = recommendSgWindow(report.sampleRate);
+                  return (
+                    <div style={{
+                      fontSize: '0.75rem', lineHeight: 1.6, padding: '8px 10px', borderRadius: '6px',
+                      background: tooWide ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.03)',
+                      border: `1px solid ${tooWide ? 'rgba(239,68,68,0.35)' : 'var(--border-color)'}`,
+                      color: tooWide ? '#fca5a5' : 'var(--text-muted)',
+                    }}>
+                      この設定で均す時間:{' '}
+                      <span className="mono" style={{ fontWeight: 700 }}>
+                        {(sec * 1000).toFixed(0)} ms
+                      </span>
+                      （サンプリング {report.sampleRate.toFixed(1)} Hz）
+                      {tooWide && (
+                        <div style={{ marginTop: 4 }}>
+                          長すぎます。実際の運動まで削られ、速度の誤差がかえって増えます。
+                          この動画なら <b>{rec} 点</b> 相当が上限の目安です。
+                          {rec <= 3 && '（＝この条件で Savitzky-Golay を使う意味は薄いということです）'}
+                          {' '}Butterworth はサンプリング間隔に自動で追随するので、
+                          迷う場合はそちらを使ってください。
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.82rem' }}>
                   <span style={{ color: 'var(--text-secondary)' }}>多項式次数:</span>
                   <select value={filterSettings.polynomialOrder}
@@ -811,7 +843,11 @@ export const DataPanel: React.FC<DataPanelProps> = ({
               background: 'rgba(255,255,255,0.03)', padding: '8px 10px', borderRadius: '6px',
             }}>
               位置を微分して速度を出すとノイズが Δt で割られて増幅されます。
-              微分の前に平滑化するのが定石で、合成データでの検証では速度の誤差が約 70% 減りました。
+              微分の前に平滑化するのが定石で、合成データでは Butterworth（自動遮断）が
+              どの条件でも速度の誤差を 35〜77% 減らしました（手動記録のように
+              点数が少ない場合も含みます）。
+              Savitzky-Golay は窓が時間として長すぎると逆効果になるため、
+              迷う場合は Butterworth を選んでください。
               フィルタは画面表示と CSV 出力の両方に効きます。
             </div>
           </div>
