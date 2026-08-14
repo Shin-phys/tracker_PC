@@ -54,6 +54,21 @@ export const toFileTime = (t: number, fps: FpsSettings): number => {
   return s > 0 ? t / s : t;
 };
 
+/**
+ * 「再生 8.00 秒 → 実時間 1.00 秒」の形で確認するための値。
+ *
+ * 倍率はファイルfps の自動計測を分子に持つので、計測が外れると
+ * 時間軸が黙って壊れる（実際に計測が半分になる不具合があった）。
+ * 秒数で出しておけば、ストップウォッチや現象の見た目と突き合わせて
+ * その場で気づける。
+ */
+export const durationCheck = (
+  playbackSeconds: number, fps: FpsSettings
+): { playback: number; real: number } => ({
+  playback: playbackSeconds,
+  real: playbackSeconds * timeScale(fps),
+});
+
 /** 「再生 8.40 s → 実時間 1.05 s」のような確認用の文字列 */
 export const describeTimeScale = (fps: FpsSettings): string => {
   const s = timeScale(fps);

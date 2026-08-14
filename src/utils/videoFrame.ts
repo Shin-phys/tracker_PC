@@ -148,7 +148,68 @@ export function stepFrames(
 }
 
 /**
+ * ファイルのフレームレートを、**シークして**実測する。
+ *
+ * なぜ再生から測らないか
+ *   以前は短く再生して rVFC の mediaTime 間隔から測っていたが、
+ *   実測で真値のちょうど半分が出た（QuickTime のエンコード FPS 30.03 に対して 15）。
+ *   再生中の rVFC は「画面に提示されたフレーム」しか拾わないため、
+ *   コールバックの登録タイミング次第で 1 枚おきになりうるし、
+ *   そもそも画面のリフレッシュレートを超えて拾えない
+ *   （240fps のファイルを 60Hz の画面で測ると 60 が上限になる）。
+ *   時間軸の換算はこの値を分子に持つので、半分になると速度も半分になる。
+ *
+ * 代わりに、一時停止したまま少しずつシークして
+ * 「mediaTime が変化した幅」を実フレーム間隔とする。
+ * 表示のレートにも登録タイミングにも影響されない。
+ *
+ * @returns 実測できた fps。できなければ null（呼び出し側は既定値のままにする）
+ */
+export async function measureFileFps(
+  video: HTMLVideoElement,
+  samples = 3
+): Promise<number | null> {
+  const v = video as RvfcVideo;
+  const duration = isFinite(v.duration) ? v.duration : 0;
+  if (!(duration > 0)) return null;
+
+  const restore = v.currentTime;
+  const wasPaused = v.paused;
+  v.pause();
+
+  const intervals: number[] = [];
+
+  // 動画の別々の場所で測る。可変フレームレートでも代表値が取れるように
+  const probePoints = [duration * 0.2, duration * 0.5, duration * 0.75]
+    .slice(0, Math.max(1, samples));
+
+  for (const start of probePoints) {
+    const base = await seekToFrameTime(v, start);
+    let found = 0;
+    // 1ms から倍々に広げ、コマが変わった最初の幅を採る。
+    // 1/1000 秒から始めれば 1000fps まで拾える
+    for (let stepMs = 1; stepMs <= 256; stepMs *= 2) {
+      const t = await seekToFrameTime(v, base + stepMs / 1000);
+      if (t > base + 1e-6) { found = t - base; break; }
+    }
+    if (found > 0.0005 && found < 1) intervals.push(found);
+  }
+
+  await seekToFrameTime(v, restore).catch(() => undefined);
+  if (!wasPaused) { try { await v.play(); } catch { /* noop */ } }
+
+  if (intervals.length === 0) return null;
+  intervals.sort((a, b) => a - b);
+  const median = intervals[Math.floor(intervals.length / 2)];
+  const fps = Math.round((1 / median) * 100) / 100;
+  return fps > 1 && fps < 1000 ? fps : null;
+}
+
+/**
  * ファイルのフレームレートを、短く再生して実測する。
+ *
+ * @deprecated 真値の半分が出ることがある（上の measureFileFps を使うこと）。
+ * 再生中の rVFC は提示されたフレームしか拾えず、画面のリフレッシュレートに縛られる。
  *
  * 自動計測は再生中の rVFC 間隔から行っているので、
  * 一度も再生せずにコマ送りを始める使い方（手動トラッキング）では

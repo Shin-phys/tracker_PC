@@ -23,7 +23,9 @@ import {
   isCalibrated as calibDone, scaleVariation,
 } from '../utils/calibration';
 import { RECOMMENDED_ROI_SIZE } from '../utils/tracker';
-import { CAPTURE_FPS_PRESETS, describeTimeScale, isTimeScaled } from '../utils/timeScale';
+import {
+  CAPTURE_FPS_PRESETS, describeTimeScale, isTimeScaled, durationCheck,
+} from '../utils/timeScale';
 import {
   Layers, Plus, Trash2, RefreshCw, Ruler,
   AlertTriangle, CheckCircle, Timer, Crosshair, LogOut, Settings2, RotateCcw,
@@ -42,6 +44,8 @@ interface ControlPanelProps {
   onUpdateTracking: (t: TrackingSettings) => void;
   fpsSettings: FpsSettings;
   onUpdateFpsSettings: (fps: FpsSettings) => void;
+  /** 動画の長さ [s] */
+  videoDuration?: number;
   isLineCalibrating: boolean;
   setIsLineCalibrating: (v: boolean) => void;
   videoWidth: number;
@@ -88,6 +92,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onUpdateTracking,
   fpsSettings,
   onUpdateFpsSettings,
+  videoDuration = 0,
   isLineCalibrating,
   setIsLineCalibrating,
   videoWidth,
@@ -678,7 +683,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
               </span>
             </div>
             <div style={{ marginTop: 4, color: 'var(--text-muted)', fontSize: '0.72rem', lineHeight: 1.6 }}>
-              再生すると実フレーム間隔から自動で決まります。コマ送りの刻み幅に使われます。
+              動画を開いたときに、コマ送りして実フレーム間隔を測っています。
+              QuickTime の「エンコード FPS」と一致するはずです。
             </div>
           </div>
 
@@ -730,6 +736,30 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             時間軸: <span className="mono" style={{ fontWeight: 700 }}>
               {describeTimeScale(fpsSettings)}
             </span>
+
+            {/* 秒数でも出す。倍率だけだと、ファイルfps の計測が外れたときに
+                時間軸が黙って壊れていても気づけない */}
+            {videoDuration > 0 && (() => {
+              const d = durationCheck(videoDuration, fpsSettings);
+              return (
+                <div style={{
+                  marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                }}>
+                  この動画:{' '}
+                  <span className="mono">再生 {d.playback.toFixed(2)} 秒</span>
+                  {' → '}
+                  <span className="mono" style={{ fontWeight: 700 }}>
+                    実時間 {d.real.toFixed(2)} 秒
+                  </span>
+                  <div style={{ marginTop: 3, color: 'var(--text-muted)', fontSize: '0.72rem' }}>
+                    この秒数が実際の現象の長さと合っているか確認してください。
+                    合わなければ撮影fpsの指定が違っています。
+                  </div>
+                </div>
+              );
+            })()}
+
             <div style={{ marginTop: 4, color: 'var(--text-muted)', fontSize: '0.72rem' }}>
               240fps で撮って 30fps で書き出したスロー動画なら「撮影fps = 240」。
               グラフと CSV の時刻・速度がこの倍率で実時間に直されます。

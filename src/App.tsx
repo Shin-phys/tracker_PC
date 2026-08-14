@@ -107,6 +107,8 @@ export const App: React.FC = () => {
 
   // ---- 動画の解像度（校正の妥当性表示に使う） ----
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
+  /** 動画の長さ [s]。時間軸の換算が正しいかを秒数で確認するために使う */
+  const [videoDuration, setVideoDuration] = useState(0);
 
   // ---- 操作に対するフィードバック（枠が小さすぎる等） ----
   const [notice, setNotice] = useState<string | null>(null);
@@ -696,6 +698,7 @@ export const App: React.FC = () => {
             selectedObjId={selectedObjId}
             onSelectObjId={setSelectedObjId}
             onUpdateRoi={handleUpdateRoi}
+            onVideoDuration={setVideoDuration}
             onManualCorrect={handleManualCorrect}
             onManualPlace={handleManualPlace}
             onManualUndo={handleManualUndo}
@@ -735,6 +738,7 @@ export const App: React.FC = () => {
             setIsLineCalibrating={setIsLineCalibrating}
             videoWidth={videoSize.width}
             videoHeight={videoSize.height}
+            videoDuration={videoDuration}
           />
           <DataPanel
             objects={objects}

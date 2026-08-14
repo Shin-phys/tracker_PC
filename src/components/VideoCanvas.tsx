@@ -31,7 +31,7 @@ import {
 import { recalcScale, pixelDistance } from '../utils/calibration';
 import { applyHomography, invertHomography, Matrix3 } from '../utils/homography';
 import { MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE } from '../utils/tracker';
-import { stepFrames, probeFileFps, seekToFrameTime } from '../utils/videoFrame';
+import { stepFrames, measureFileFps, seekToFrameTime } from '../utils/videoFrame';
 import { medianDt } from '../utils/butterworth';
 import {
   nextManualTarget, countManualPoints, manualStepInterval,
@@ -67,6 +67,8 @@ interface VideoCanvasProps {
   isLineCalibrating: boolean;
   setIsLineCalibrating: (v: boolean) => void;
   onVideoSize?: (s: { width: number; height: number }) => void;
+  /** 動画の長さ [s]。時間軸の確認表示に使う */
+  onVideoDuration?: (d: number) => void;
   /** グラフのクリックから届くシーク指示。n は連番（同じ時刻の再指示を拾うため） */
   seekRequest?: { t: number; n: number } | null;
 }
@@ -90,7 +92,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   calibration, onUpdateCalibration, onProcessFrame,
   historyData, onResetData, onClearTrail, isPlaying, setIsPlaying,
   fpsSettings, setFpsSettings,
-  isLineCalibrating, setIsLineCalibrating, onVideoSize, seekRequest,
+  isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -205,6 +207,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     setVideoDimensions({ width: v.videoWidth, height: v.videoHeight });
     onVideoSize?.({ width: v.videoWidth, height: v.videoHeight });
     setDuration(v.duration || 0);
+    onVideoDuration?.(v.duration || 0);
     setVideoLoaded(true);
     // 先頭にシークして seeked → 描画へつなぐ
     try { v.currentTime = 0; } catch (_) { /* noop */ }
@@ -242,7 +245,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     if (!v) return;
     let cancelled = false;
     (async () => {
-      const fps = await probeFileFps(v);
+      const fps = await measureFileFps(v);
       if (cancelled) return;
       if (fps && Math.abs(fps - fpsRef.current.value) > 0.05) {
         setFpsRef.current({ ...fpsRef.current, value: fps });
@@ -1074,26 +1077,14 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     let rafId: number | null = null;
 
     const step = (mediaTime: number) => {
-      // FPS 自動計測（実フレーム間隔の中央値）
-      const prev = lastMediaTimeRef.current;
-      if (prev !== null) {
-        const dt = mediaTime - prev;
-        if (dt > 0.0005 && dt < 1) {
-          const arr = frameIntervalsRef.current;
-          arr.push(dt);
-          if (arr.length > 60) arr.shift();
-          if (arr.length >= 10) {
-            const sorted = [...arr].sort((a, b) => a - b);
-            const median = sorted[Math.floor(sorted.length / 2)];
-            const fps = Math.round((1 / median) * 1000) / 1000;
-            // ファイルfps は常に自動計測で上書きする。
-            // 撮影fps（captureFps）はユーザーの入力なので保つ。
-            if (fps > 1 && fps < 1000 && Math.abs(fps - fpsRef.current.value) > 0.05) {
-              setFpsRef.current({ ...fpsRef.current, value: fps });
-            }
-          }
-        }
-      }
+      // ここでは fps を計測しない。
+      //
+      // 以前は再生中の rVFC 間隔から測っていたが、実測で真値のちょうど半分が出た
+      // （QuickTime のエンコード FPS 30.03 に対して 15）。
+      // 再生中の rVFC は「画面に提示されたフレーム」しか拾えず、
+      // 登録タイミング次第で 1 枚おきになるうえ、画面のリフレッシュレートも超えられない。
+      // 時間軸の換算はこの値を分子に持つので、半分になると速度も半分になる。
+      // ファイルfps は読み込み時の measureFileFps（シークで測る）だけに任せる。
       lastMediaTimeRef.current = mediaTime;
       // 再生中も「いま見えているフレームの時刻」を更新しておく。
       // 一時停止した直後に手で点を打つとき、この値が使われる
