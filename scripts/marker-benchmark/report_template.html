@@ -1,0 +1,385 @@
+<title>マーカーはどの形がいちばん追えるか</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=IBM+Plex+Mono:wght@400;600&family=Zen+Kaku+Gothic+New:wght@700;900&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --paper:#f2f4f6; --surface:#ffffff; --surface-2:#e7ebef; --surface-3:#f7f9fa;
+  --ink:#12171c; --ink-2:#4b555e; --ink-3:#78848d;
+  --rule:#d6dde3; --rule-2:#c2ccd4;
+  --accent:#2a78d6; --accent-2:#eb6834; --critical:#c8342f; --good:#0a8c30;
+  --band:0.16;
+  --shadow:0 1px 2px rgba(18,23,28,.06), 0 8px 24px -16px rgba(18,23,28,.35);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --paper:#101315; --surface:#181c20; --surface-2:#232a30; --surface-3:#1d2226;
+    --ink:#eef2f4; --ink-2:#aeb9c1; --ink-3:#7b868e;
+    --rule:#2b3238; --rule-2:#39424a;
+    --accent:#4f97ee; --accent-2:#f0794a; --critical:#f0706a; --good:#3fbf5f;
+    --band:0.22;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --paper:#101315; --surface:#181c20; --surface-2:#232a30; --surface-3:#1d2226;
+  --ink:#eef2f4; --ink-2:#aeb9c1; --ink-3:#7b868e;
+  --rule:#2b3238; --rule-2:#39424a;
+  --accent:#4f97ee; --accent-2:#f0794a; --critical:#f0706a; --good:#3fbf5f;
+  --band:0.22;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.8);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:"BIZ UDPGothic","Hiragino Sans","Noto Sans JP",system-ui,sans-serif;
+  font-size:16.5px; line-height:1.9;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1000px; margin:0 auto; padding:0 24px 96px}
+h1,h2,h3,.disp{font-family:"Zen Kaku Gothic New","Hiragino Sans",system-ui,sans-serif;
+  font-weight:900; letter-spacing:.01em; text-wrap:balance; line-height:1.35}
+.mono,.num,code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,monospace;
+  font-variant-numeric:tabular-nums}
+
+/* ---- 見出し ---- */
+header.hero{padding:72px 0 40px; border-bottom:2px solid var(--ink)}
+.eyebrow{font-size:.74rem; letter-spacing:.18em; text-transform:uppercase;
+  color:var(--accent); font-weight:700; margin:0 0 18px; font-family:"IBM Plex Mono",monospace}
+h1{font-size:clamp(2.1rem,5.2vw,3.2rem); margin:0 0 20px}
+.lead{font-size:1.06rem; color:var(--ink-2); max-width:64ch; margin:0}
+.meta{display:flex; flex-wrap:wrap; gap:8px 28px; margin-top:26px;
+  font-size:.8rem; color:var(--ink-3); font-family:"IBM Plex Mono",monospace}
+.meta b{color:var(--ink-2); font-weight:600}
+
+section{padding-top:56px}
+h2{font-size:1.42rem; margin:0 0 6px; padding-bottom:10px; border-bottom:1px solid var(--rule)}
+h2 .n{color:var(--ink-3); font-family:"IBM Plex Mono",monospace; font-size:.8rem;
+  font-weight:400; margin-right:12px; letter-spacing:.1em}
+h3{font-size:1.06rem; margin:34px 0 8px}
+p{margin:0 0 16px; max-width:68ch}
+a{color:var(--accent)}
+strong{font-weight:700}
+
+/* ---- 結論カード ---- */
+.findings{display:grid; gap:18px; margin-top:26px}
+@media(min-width:820px){.findings{grid-template-columns:repeat(3,1fr)}}
+.f{background:var(--surface); border:1px solid var(--rule); border-radius:4px;
+  padding:22px 22px 24px; box-shadow:var(--shadow); display:flex; flex-direction:column; gap:10px}
+.f .rank{font-family:"IBM Plex Mono",monospace; font-size:.72rem; letter-spacing:.14em;
+  color:var(--ink-3)}
+.f .big{font-family:"Zen Kaku Gothic New",sans-serif; font-weight:900;
+  font-size:2.5rem; line-height:1; color:var(--accent); font-variant-numeric:tabular-nums}
+.f .big small{font-size:.9rem; font-weight:700; color:var(--ink-2); margin-left:4px}
+.f .big.warn{color:var(--critical)}
+.f h3{margin:0; font-size:1.02rem}
+.f p{margin:0; font-size:.92rem; color:var(--ink-2); line-height:1.8}
+
+/* ---- 図 ---- */
+figure.chart-fig{margin:28px 0 8px; background:var(--surface); border:1px solid var(--rule);
+  border-radius:4px; padding:22px 20px 14px; box-shadow:var(--shadow)}
+figure.chart-fig figcaption{font-size:.84rem; color:var(--ink-2); margin-top:10px;
+  padding-top:12px; border-top:1px solid var(--rule); line-height:1.75}
+figure.chart-fig figcaption b{color:var(--ink)}
+.chart{display:block; overflow:visible}
+.chart .grid{stroke:var(--rule); stroke-width:1}
+.chart .ref{stroke:var(--critical); stroke-width:1.5; stroke-dasharray:5 4}
+.chart .reflab{fill:var(--critical); font-size:11px; font-family:"IBM Plex Mono",monospace}
+.chart .tick{fill:var(--ink-3); font-size:11.5px; font-family:"IBM Plex Mono",monospace}
+.chart .axis{fill:var(--ink-2); font-size:12px}
+.chart .cat{fill:var(--ink); font-size:13px}
+.chart .val{fill:var(--ink); font-size:12.5px; font-family:"IBM Plex Mono",monospace; font-weight:600}
+.chart .val--sm{font-size:11px; font-weight:400; fill:var(--ink-2)}
+.chart .bar{fill:var(--accent)}
+.chart .bar--hi{fill:var(--critical)}
+.chart .ser1{fill:var(--accent); stroke:var(--accent)}
+.chart .ser2{fill:var(--accent-2); stroke:var(--accent-2)}
+.chart .line{fill:none; stroke-width:2.5; stroke-linejoin:round}
+.chart .dot{stroke:var(--surface); stroke-width:2}
+.chart .band{opacity:var(--band); stroke:none}
+.chart .dlabel{font-size:12.5px; font-weight:700; stroke:none}
+.chart g:hover .bar,.chart g:hover .ser1,.chart g:hover .ser2{opacity:.75}
+.legend{display:flex; gap:20px; flex-wrap:wrap; font-size:.84rem; color:var(--ink-2);
+  margin:2px 0 0; padding:0; list-style:none}
+.legend li{display:flex; align-items:center; gap:8px}
+.legend i{width:14px; height:14px; border-radius:3px; display:block}
+.sw1{background:var(--accent)} .sw2{background:var(--accent-2)}
+
+/* ---- 表 ---- */
+.tablewrap{overflow-x:auto; margin:26px 0 8px; border:1px solid var(--rule);
+  border-radius:4px; background:var(--surface); box-shadow:var(--shadow)}
+table{border-collapse:collapse; width:100%; font-size:.85rem}
+th,td{padding:9px 11px; text-align:left; border-bottom:1px solid var(--rule); white-space:nowrap}
+thead th{font-size:.76rem; color:var(--ink-2); font-weight:700; background:var(--surface-3);
+  position:sticky; top:0}
+tbody th{font-weight:400; color:var(--ink-2); font-size:.82rem}
+.matrix td{text-align:right; font-family:"IBM Plex Mono",monospace;
+  background:color-mix(in srgb, var(--accent) calc(var(--t,0) * 34%), transparent)}
+.matrix td .num{font-weight:600}
+.matrix .fail{display:block; font-size:.68rem; color:var(--critical); font-weight:700;
+  font-family:"BIZ UDPGothic",sans-serif}
+tbody tr:last-child th,tbody tr:last-child td{border-bottom:none}
+.rec td:first-child{font-weight:700; color:var(--ink); white-space:normal; min-width:15em}
+.rec td{white-space:normal; vertical-align:top}
+
+/* ---- マーカー見本 ---- */
+.gallery{display:grid; gap:16px; margin:26px 0 8px;
+  grid-template-columns:repeat(auto-fill,minmax(190px,1fr))}
+.mk{margin:0; background:var(--surface); border:1px solid var(--rule); border-radius:4px;
+  overflow:hidden; box-shadow:var(--shadow)}
+.mk img{display:block; width:100%; height:auto; image-rendering:pixelated;
+  border-bottom:1px solid var(--rule)}
+.mk figcaption{padding:12px 14px 14px; display:flex; flex-direction:column; gap:4px;
+  font-size:.8rem; line-height:1.65}
+.mk figcaption b{font-size:.9rem}
+.mk figcaption span{color:var(--ink-2)}
+.mk .mkval{font-family:"IBM Plex Mono",monospace; color:var(--ink-3); font-size:.76rem}
+.mk .mkval b{color:var(--ink); font-size:.86rem}
+
+/* ---- 補足ブロック ---- */
+.note{border-left:3px solid var(--accent); background:var(--surface-3);
+  padding:16px 20px; margin:24px 0; border-radius:0 4px 4px 0}
+.note p{margin:0; font-size:.92rem; color:var(--ink-2)}
+.note p+p{margin-top:10px}
+.note.caution{border-left-color:var(--accent-2)}
+.formula{background:var(--surface); border:1px solid var(--rule-2); border-radius:4px;
+  padding:18px 20px; margin:20px 0; font-family:"IBM Plex Mono",monospace;
+  font-size:.92rem; color:var(--ink); overflow-x:auto}
+ul.plain{margin:0 0 16px; padding-left:1.25em; max-width:68ch}
+ul.plain li{margin-bottom:8px}
+footer{margin-top:72px; padding-top:24px; border-top:1px solid var(--rule);
+  font-size:.8rem; color:var(--ink-3)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">MotionTrace Pro / 追跡精度の実測</p>
+  <h1>マーカーはどの形がいちばん追えるか</h1>
+  <p class="lead">
+    7 種類のマーカーを、MotionTrace Pro が実際に使っている照合アルゴリズム
+    （TM_CCOEFF_NORMED ＋ 相関ピークの 2 次曲面フィット）そのものにかけ、
+    8 条件 8,400 回の合成試行で位置誤差を測りました。さらに枠の大きさの掃引と
+    「物体の上に貼った場合」で 4,000 回。真の位置が分かっている合成画像なので、
+    誤差を 0.001 px の桁まで直接読めます。
+  </p>
+  <div class="meta">
+    <span><b>試行</b> 7 形状 × 8 条件 × 150 回</span>
+    <span><b>スーパーサンプリング</b> 10×</span>
+    <span><b>マーカー径</b> 30 px（既定）</span>
+    <span><b>枠</b> 1.4 × 径</span>
+  </div>
+</header>
+
+<section>
+  <h2><span class="n">01</span>先に結論</h2>
+
+  <div class="findings">
+    <div class="f">
+      <span class="rank">いちばん効くもの</span>
+      <span class="big">13<small>倍</small></span>
+      <h3>形より「枠の中身」</h3>
+      <p>同じ枠の大きさでも、枠が動く物体で埋まっていれば誤差 0.011 px、静止背景が入ると
+        0.139 px。枠を広げるとこの差は 34 倍まで開きます。形状の差（最大 4 倍）より
+        一桁大きい効き方です。</p>
+    </div>
+    <div class="f">
+      <span class="rank">形状の差</span>
+      <span class="big">3.7<small>倍</small></span>
+      <h3>白い丸が最下位</h3>
+      <p>背景が枠に入る条件では、いま使っている白い丸シールが 7 種類中の最下位（0.251 px）。
+        太い十字にするだけで 0.069 px まで下がります。方眼紙を背景にすると
+        白い丸は 3 回に 2 回そもそも捕まえ損ねます。</p>
+    </div>
+    <div class="f">
+      <span class="rank">見落としやすい罠</span>
+      <span class="big warn">0.51</span>
+      <h3>十字は回転に弱い</h3>
+      <p>物体が 15° 回っただけで、十字の一致度は 0.98 → 0.51 まで落ちます
+        （LOST 判定の閾値は 0.45）。回る物体に使えるのは同心円と丸だけです。</p>
+    </div>
+  </div>
+
+  <h3>結局どれを貼るか</h3>
+  <div class="tablewrap"><table class="rec">
+    <thead><tr><th>状況</th><th>推奨</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td>回転しない対象<br>（台車・カート・落とす箱）</td>
+          <td>太い十字（腕幅 = 径の 1/4）</td>
+          <td>全条件を通じて最良か最良に近い。高コントラストの境界線が縦横に最も長く走るため。</td></tr>
+      <tr><td>回転する対象<br>（球・輪・振り子のおもり）</td>
+          <td>同心円（二重丸）</td>
+          <td>回しても模様が変わらない唯一の印刷マーカー。15° 回転で誤差 0.078 → 0.090 px と、ほぼ変化なし。</td></tr>
+      <tr><td>迷ったとき</td>
+          <td>白いシールに黒丸</td>
+          <td>回転に強く、他の場所と紛れにくさ（margin 0.70）も最上位クラス。精度は中位だが破綻しない。</td></tr>
+      <tr><td>貼れる面が広いとき</td>
+          <td>形より枠の取り方</td>
+          <td>枠を物体の面だけで埋められるなら、形状の差はほぼ消える。まずそちらを優先。</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2><span class="n">02</span>マーカーと素の成績</h2>
+  <p>
+    比較の土俵をそろえるため、すべて「一辺 30 px のシール」として同じ面積を占めるように描いています。
+    下の画像は実際にベンチマークで使った描画をそのまま 4 倍に引き伸ばしたものです
+    （画素の姿を見せるため補間なし）。RMS は標準条件＝枠に静止背景が入る場合の値です。
+  </p>
+  <div class="gallery">{{GALLERY}}</div>
+
+  <figure class="chart-fig">
+    {{CHARTA}}
+    <figcaption>
+      <b>標準条件（枠に静止背景が入る）での位置誤差。</b>
+      十字が上位を占め、白い丸シールが最下位。十字が 4 分割円や市松に勝つのは予想外でしたが、
+      種を変えて 3 回繰り返しても順位は変わりませんでした。高コントラストの境界線が
+      縦横方向に走る総延長で説明がつきます（十字の内部エッジは 4 分割円のおよそ 2 倍あり、
+      誤差はちょうど 1/2 になっています）。
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="n">03</span>形より効くもの — 枠の中身</h2>
+  <p>
+    カメラが固定で物体が動く以上、枠に写り込んだ背景は次のコマでは必ずずれています。
+    テンプレートの中で「動かないもの」は、照合を前のコマの位置へ引き戻す方向に働きます。
+    そこで、枠の大きさを変えながら、シールを<strong>静止背景に直接貼った場合</strong>と、
+    <strong>動く物体（一辺 2.5 倍）の上に貼った場合</strong>を比べました。
+  </p>
+  <figure class="chart-fig">
+    {{CHARTB}}
+    <ul class="legend">
+      <li><i class="sw1"></i>動く物体の上（枠の中身が全部いっしょに動く）</li>
+      <li><i class="sw2"></i>静止背景の上（枠の周りが動かない）</li>
+    </ul>
+    <figcaption>
+      <b>縦軸は対数。</b>帯は 4 形状のばらつき（最小〜最大）。
+      静止背景の上では、枠に入る背景の面積にほぼ比例して誤差が増えます（×1.0 で 0.036 px →
+      ×2.0 で 0.352 px）。動く物体の上では枠をいくら大きくしても 0.010 px のまま横ばいで、
+      しかも形状によるばらつきがほとんど消えます。
+    </figcaption>
+  </figure>
+
+  <div class="note">
+    <p><strong>実務上の意味。</strong>「枠は大きいほうがよい／小さいほうがよい」ではありません。
+      正しくは<strong>「枠を、マーカーと一緒に動くもので埋める」</strong>です。
+      台車のようにシールを貼る面が広い対象なら、枠を大きく取っても害はなく、
+      他の場所と紛れにくくなるぶん有利になります。逆に、小球や細い棒のように
+      枠がどうしても背景を含んでしまう対象では、枠を<strong>マーカーぎりぎりまで詰める</strong>のが正解です。</p>
+    <p>これは既存の「シールの周りの模様が少し入るくらいに囲む」という助言と、
+      場面によっては逆を向きます。あの助言は「小さすぎる枠はどこにでも一致する」を避けるためのもので、
+      それ自体は正しいのですが、周りに入れるべきなのは<strong>背景ではなく物体の面</strong>です。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">04</span>回転すると何が壊れるか</h2>
+  <p>
+    いまのトラッカーは回転不変ではありません。テンプレートは枠を引いた瞬間の画そのものなので、
+    物体が回ると模様が合わなくなります。どれくらい効くかを 15° の回転で測りました。
+  </p>
+  <figure class="chart-fig">
+    {{CHARTC}}
+    <ul class="legend">
+      <li><i class="sw1"></i>回転なし</li>
+      <li><i class="sw2"></i>15° 回転</li>
+    </ul>
+    <figcaption>
+      <b>赤い破線は LOST 判定の閾値 0.45。</b>
+      十字は 0.98 → 0.51 と閾値の際まで落ち、細い十字では 16% の試行で 1 px 以上外しました。
+      市松と 4 分割円も 0.76 前後まで下がります。一方、同心円・白丸・黒丸は 0.97 以上を保ち、
+      誤差もほとんど増えません（同心円 0.078 → 0.090 px）。
+      <strong>転がる球や回る輪には、十字・市松・4 分割円を使ってはいけません。</strong>
+    </figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="n">05</span>条件別の全結果</h2>
+  <p>
+    各セルは位置の RMS 誤差 [px]。色が濃いほどその条件の中で悪い値です。
+    セルにカーソルを載せると一致度と破綻率も読めます。
+  </p>
+  {{MATRIX}}
+  <div class="note caution">
+    <p><strong>方眼紙の行を見てください。</strong>目盛りや方眼のある背景では、白い丸シールが
+      150 回中 100 回、1 px 以上外しました。相関のピークが格子の交点に引っ張られるためです。
+      印刷したマーカーは 7 種すべて破綻ゼロでした。
+      「十字は直線の多い背景で紛れやすいのでは」という事前の予想は外れで、実際には十字がこの条件でも最良でした。</p>
+    <p><strong>無地の背景の行も見てください。</strong>すべての形が 0.01 px 前後に張り付いています。
+      これがこの測定系の下限＝ノイズだけで決まる限界であり、他の行との差はすべて
+      「枠に入り込んだ静止背景」が作っていることを意味します。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">06</span>どう作って測ったか</h2>
+  <p>
+    合成画像を 10 倍のスーパーサンプリング座標系で描き、面積平均（<code>INTER_AREA</code>）で
+    縮小しています。実際のカメラの画素は面積積分なので、これが物理的に正しい標本化になります。
+    マーカーは 10 倍座標の整数位置に置くので、1× でのサブピクセル位置は必ず 1/10 の倍数で、
+    真値は丸めではなく厳密に決まります。
+  </p>
+  <p>
+    描画したあとに、レンズのボケ（ガウス）、露光中の移動（水平方向の箱型平均）、
+    センサノイズ（ガウス）を順にかけます。テンプレートは「枠を引いた瞬間のコマ」から作り、
+    そのコマにも独立なノイズを乗せます。実際の運用と同じく、テンプレート自身もノイズを含みます。
+  </p>
+
+  <h3>測定系そのものの点検</h3>
+  <ul class="plain">
+    <li><strong>ヌルテスト</strong> — ノイズ 0・無地背景・変位 0 で、誤差は 7 形状すべて 1×10⁻⁶ px 以下。
+      パイプラインに系統的なずれはありません。</li>
+    <li><strong>推定量の偏り</strong> — ノイズ 0 で既知の変位を与えたときに残る誤差
+      （＝ピクセルロッキング）は 0.008〜0.012 px。標準条件の誤差 0.06〜0.25 px の
+      5〜25 分の 1 なので、この比較の結論を左右しません。</li>
+    <li><strong>理論との整合</strong> — ボケを強くするとピクセルロッキングは
+      σ 0.4 で 0.02 px → σ 1.5 以上で 0.003 px 以下まで減りました。相関ピークが 2〜3 px 幅に
+      広がるほど 3×3 の 2 次曲面フィットが成り立つ、という予測どおりです。
+      ただし絶対値が小さいので、<strong>ピント合わせを意図的に甘くする必要はありません</strong>。</li>
+    <li><strong>再現性</strong> — 乱数の種を 3 通り変えても、上位 4 種と最下位の順位は変わりませんでした。</li>
+  </ul>
+
+  <div class="note caution">
+    <p><strong>この測定が扱っていないこと。</strong>合成画像なので、実際のレンズの歪み、
+      ローリングシャッター、動画コーデックの圧縮ノイズ、印刷のにじみ、シールの反射は入っていません。
+      とくに<strong>圧縮</strong>は、細い線を持つマーカー（細い十字）に対して合成ノイズより
+      不利に働く可能性があります。細い十字ではなく<strong>太い十字</strong>を推している理由の一つです。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">07</span>実際に貼るときの寸法</h2>
+  <p>
+    マーカーは画面上で <strong>20〜30 px</strong> になる大きさに作ります。必要な実寸は
+    視野の広さと画素数から決まります。
+  </p>
+  <div class="formula">
+必要な実寸 [mm] = 視野の横幅 [mm] ÷ 横の画素数 [px] × 25 [px]
+
+例) 視野 2.0 m を 1920 px で撮る → 2000 ÷ 1920 × 25 ≒ <b>26 mm</b>
+例) 視野 0.6 m を 1920 px で撮る → 600 ÷ 1920 × 25 ≒ <b>8 mm</b>
+  </div>
+  <p>
+    十字の腕幅は径の 1/4、同心円は 白 D ／ 黒 0.62D ／ 白 0.31D の比率です。
+    <strong>線は画面上で 3 px 以上</strong>になるようにしてください。これを割ると、
+    ボケとモーションブラーで線が消えて模様として機能しなくなります。
+    印刷はレーザーでもインクジェットでも構いませんが、光沢紙は照明が映り込むので避けてください。
+  </p>
+</section>
+
+<footer>
+  ベンチマークのコードは MotionTrace Pro Ver.2 リポジトリの
+  <code>scripts/marker-benchmark/</code> にあります。<code>python3 bench.py main</code> で再実行できます。
+</footer>
+
+</div>

@@ -18,16 +18,21 @@ import {
 import { autoFilter, butterworthZeroPhase, derivative, medianDt } from '../utils/butterworth';
 import { isCalibrated } from '../utils/calibration';
 import { smoothSeries } from '../utils/graphSmooth';
+import {
+  TimeRange, clipToRange, hasRange, MIN_RANGE_POINTS,
+} from '../utils/timeRange';
 import { GraphPanel } from './GraphPanel';
 import { AxisKey } from './MotionGraph';
 import {
   Download, Sliders, Activity, ArrowRightLeft, ChevronDown, ChevronUp,
-  LineChart, Maximize2, X,
+  LineChart, Maximize2, X, Scissors,
 } from 'lucide-react';
 
 interface DataPanelProps {
   objects: TrackedObject[];
   historyData: FrameData[];
+  /** 解析区間。ここで絞られたデータだけがグラフ・フィルタ・CSV に入る */
+  timeRange: TimeRange;
   filterSettings: FilterSettings;
   onUpdateFilterSettings: (settings: FilterSettings) => void;
   calibration: ScaleCalibration;
@@ -55,7 +60,8 @@ interface DataPanelProps {
 
 export const DataPanel: React.FC<DataPanelProps> = ({
   objects,
-  historyData,
+  historyData: historyDataAll,
+  timeRange,
   filterSettings,
   onUpdateFilterSettings,
   calibration,
@@ -64,6 +70,24 @@ export const DataPanel: React.FC<DataPanelProps> = ({
   hiddenGraphIds, onToggleGraphId, onSeek,
   graphSmooth, graphSmoothWindow, onChangeGraphSmooth, onChangeGraphSmoothWindow,
 }) => {
+  /**
+   * 区間で絞ったデータ。以降の処理はすべてこちらを見る。
+   *
+   * 記録側でも区間外は弾いているので、通常はここで減らない。
+   * 効くのは「一度記録したあとで区間を狭めた」場合で、
+   * そのときは取り直さずにグラフ・フィルタ・CSV が新しい区間に追随する。
+   * 記録そのものは残っているので、区間を広げれば戻る（非破壊）。
+   */
+  const historyData = useMemo(
+    () => clipToRange(historyDataAll, timeRange),
+    [historyDataAll, timeRange]
+  );
+  /** 区間で切り落とされたフレーム数（UI の説明に使う） */
+  const clippedCount = historyDataAll.length - historyData.length;
+  /** 点数が少なすぎると Butterworth の自動遮断周波数の選択が不安定になる */
+  const tooFewInRange =
+    hasRange(timeRange) && historyData.length > 0 && historyData.length < MIN_RANGE_POINTS;
+
   const activeObjects = useMemo(() => objects.filter(o => o.active), [objects]);
   const [showFilterSettings, setShowFilterSettings] = useState(false);
   /** グラフを全画面で見る（形の判断は大きいほうが確実） */
@@ -351,6 +375,44 @@ export const DataPanel: React.FC<DataPanelProps> = ({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+      {/* ========================================
+          0. 解析区間の状態
+          区間が効いているのに気づかないまま数値を読む、という事故を防ぐ。
+          ======================================== */}
+      {hasRange(timeRange) && (
+        <div
+          style={{
+            display: 'flex', alignItems: 'flex-start', gap: '8px',
+            padding: '9px 12px', borderRadius: '8px', lineHeight: 1.6,
+            fontSize: '0.76rem',
+            background: tooFewInRange ? 'rgba(245,158,11,0.10)' : 'rgba(99,102,241,0.08)',
+            border: `1px solid ${tooFewInRange ? 'rgba(245,158,11,0.4)' : 'rgba(99,102,241,0.25)'}`,
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <Scissors
+            size={14}
+            color={tooFewInRange ? '#f59e0b' : 'var(--accent-primary)'}
+            style={{ flexShrink: 0, marginTop: '3px' }}
+          />
+          <span>
+            <b style={{ color: 'var(--text-primary)' }}>
+              区間 {timeRange.start !== null ? `${timeRange.start.toFixed(3)} s` : '先頭'}
+              {' 〜 '}
+              {timeRange.end !== null ? `${timeRange.end.toFixed(3)} s` : '末尾'}
+            </b>
+            {' '}のデータだけを使っています（{historyData.length} 点
+            {clippedCount > 0 && ` / 区間外 ${clippedCount} 点を除外`}）。
+            {tooFewInRange && (
+              <span style={{ color: '#fcd34d', fontWeight: 600 }}>
+                {' '}⚠ {MIN_RANGE_POINTS} 点未満です。Butterworth の遮断周波数の自動選択が
+                不安定になります。区間を広げるか、コマ送り幅を細かくしてください。
+              </span>
+            )}
+          </span>
+        </div>
+      )}
 
       {/* ========================================
           1. グラフ概形（計測が使い物になるかの判断用）
@@ -894,6 +956,10 @@ export const DataPanel: React.FC<DataPanelProps> = ({
             </div>
             <div style={{ marginTop: '4px', color: 'rgba(255,255,255,0.25)' }}>
               BOM付きUTF-8 / Excel対応
+              {hasRange(timeRange) &&
+                ` / 区間 ${timeRange.start !== null ? timeRange.start.toFixed(3) : '先頭'}〜${
+                  timeRange.end !== null ? timeRange.end.toFixed(3) : '末尾'
+                } s のみ`}
               {calibration.mode === 'plane' && calibration.homography && ' / 射影変換で遠近補正済み'}
               {filterSettings.enabled && ' / フィルタ適用後の値'}
               {isTimeScaled(fpsSettings) &&

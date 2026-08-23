@@ -1,0 +1,128 @@
+[
+ {
+  "case": "body_plain",
+  "label": "\u7269\u4f53\u304c\u5358\u8272\uff08\u6a21\u69d8\u306e\u306a\u3044\u53f0\u8eca\u30fb\u7403\uff09",
+  "marker": "white_dot",
+  "rms": 0.010680217052430179,
+  "fail_rate": 0.0,
+  "score": 0.9950969612598419,
+  "margin": 0.3348066492875417
+ },
+ {
+  "case": "body_plain",
+  "label": "\u7269\u4f53\u304c\u5358\u8272\uff08\u6a21\u69d8\u306e\u306a\u3044\u53f0\u8eca\u30fb\u7403\uff09",
+  "marker": "black_dot",
+  "rms": 0.009420273427588045,
+  "fail_rate": 0.0,
+  "score": 0.988927409251531,
+  "margin": 0.7491598323980967
+ },
+ {
+  "case": "body_plain",
+  "label": "\u7269\u4f53\u304c\u5358\u8272\uff08\u6a21\u69d8\u306e\u306a\u3044\u53f0\u8eca\u30fb\u7403\uff09",
+  "marker": "cross_thin",
+  "rms": 0.011942357593110603,
+  "fail_rate": 0.0,
+  "score": 0.988730141321818,
+  "margin": 0.43576798717180887
+ },
+ {
+  "case": "body_plain",
+  "label": "\u7269\u4f53\u304c\u5358\u8272\uff08\u6a21\u69d8\u306e\u306a\u3044\u53f0\u8eca\u30fb\u7403\uff09",
+  "marker": "cross_thick",
+  "rms": 0.011417353401463909,
+  "fail_rate": 0.0,
+  "score": 0.989522480169932,
+  "margin": 0.36730599880218506
+ },
+ {
+  "case": "body_plain",
+  "label": "\u7269\u4f53\u304c\u5358\u8272\uff08\u6a21\u69d8\u306e\u306a\u3044\u53f0\u8eca\u30fb\u7403\uff09",
+  "marker": "quad_circle",
+  "rms": 0.010909644629059505,
+  "fail_rate": 0.0,
+  "score": 0.9911913132667541,
+  "margin": 0.5278910148143768
+ },
+ {
+  "case": "body_plain",
+  "label": "\u7269\u4f53\u304c\u5358\u8272\uff08\u6a21\u69d8\u306e\u306a\u3044\u53f0\u8eca\u30fb\u7403\uff09",
+  "marker": "checker",
+  "rms": 0.011199526598876013,
+  "fail_rate": 0.0,
+  "score": 0.9921021473407745,
+  "margin": 0.41880420088768006
+ },
+ {
+  "case": "body_plain",
+  "label": "\u7269\u4f53\u304c\u5358\u8272\uff08\u6a21\u69d8\u306e\u306a\u3044\u53f0\u8eca\u30fb\u7403\uff09",
+  "marker": "bullseye",
+  "rms": 0.008480580587685258,
+  "fail_rate": 0.0,
+  "score": 0.9866059601306916,
+  "margin": 0.8137138996521632
+ },
+ {
+  "case": "body_tex",
+  "label": "\u7269\u4f53\u306b\u6a21\u69d8\u304c\u3042\u308b\uff08\u6728\u76ee\u30fb\u30e9\u30d9\u30eb\u30fb\u30cd\u30b8\uff09",
+  "marker": "white_dot",
+  "rms": 0.01047998119529391,
+  "fail_rate": 0.0,
+  "score": 0.9948963801066081,
+  "margin": 0.3495979698499044
+ },
+ {
+  "case": "body_tex",
+  "label": "\u7269\u4f53\u306b\u6a21\u69d8\u304c\u3042\u308b\uff08\u6728\u76ee\u30fb\u30e9\u30d9\u30eb\u30fb\u30cd\u30b8\uff09",
+  "marker": "black_dot",
+  "rms": 0.009746550299534527,
+  "fail_rate": 0.0,
+  "score": 0.9890803611278534,
+  "margin": 0.699062543908755
+ },
+ {
+  "case": "body_tex",
+  "label": "\u7269\u4f53\u306b\u6a21\u69d8\u304c\u3042\u308b\uff08\u6728\u76ee\u30fb\u30e9\u30d9\u30eb\u30fb\u30cd\u30b8\uff09",
+  "marker": "cross_thin",
+  "rms": 0.012112745786425677,
+  "fail_rate": 0.0,
+  "score": 0.988331541220347,
+  "margin": 0.4354757070541382
+ },
+ {
+  "case": "body_tex",
+  "label": "\u7269\u4f53\u306b\u6a21\u69d8\u304c\u3042\u308b\uff08\u6728\u76ee\u30fb\u30e9\u30d9\u30eb\u30fb\u30cd\u30b8\uff09",
+  "marker": "cross_thick",
+  "rms": 0.01109364565281215,
+  "fail_rate": 0.0,
+  "score": 0.9894740279515585,
+  "margin": 0.3381709563732147
+ },
+ {
+  "case": "body_tex",
+  "label": "\u7269\u4f53\u306b\u6a21\u69d8\u304c\u3042\u308b\uff08\u6728\u76ee\u30fb\u30e9\u30d9\u30eb\u30fb\u30cd\u30b8\uff09",
+  "marker": "quad_circle",
+  "rms": 0.010766713666667007,
+  "fail_rate": 0.0,
+  "score": 0.9909648803869883,
+  "margin": 0.5400240163008372
+ },
+ {
+  "case": "body_tex",
+  "label": "\u7269\u4f53\u306b\u6a21\u69d8\u304c\u3042\u308b\uff08\u6728\u76ee\u30fb\u30e9\u30d9\u30eb\u30fb\u30cd\u30b8\uff09",
+  "marker": "checker",
+  "rms": 0.010996679132770611,
+  "fail_rate": 0.0,
+  "score": 0.9923427951335907,
+  "margin": 0.4070825664202372
+ },
+ {
+  "case": "body_tex",
+  "label": "\u7269\u4f53\u306b\u6a21\u69d8\u304c\u3042\u308b\uff08\u6728\u76ee\u30fb\u30e9\u30d9\u30eb\u30fb\u30cd\u30b8\uff09",
+  "marker": "bullseye",
+  "rms": 0.008820595179720026,
+  "fail_rate": 0.0,
+  "score": 0.9867511471112569,
+  "margin": 0.8153384654720625
+ }
+]

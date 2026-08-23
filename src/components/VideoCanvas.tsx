@@ -39,8 +39,14 @@ import {
 } from '../utils/manualTrack';
 import { timeScale } from '../utils/timeScale';
 import {
+  TimeRange, FULL_RANGE, hasRange, rangeStart, rangeEnd, rangeSpan,
+  countInRange, MIN_RANGE_POINTS,
+  earliestRoiTime, restartTimeFor, roiTimeSpread, sameFrameTolerance,
+} from '../utils/timeRange';
+import {
   Play, Pause, RotateCcw, Upload, Crosshair, ZoomIn, ZoomOut,
-  Eraser, ChevronLeft, ChevronRight, Gauge, Hand, MousePointerClick, Undo2
+  Eraser, ChevronLeft, ChevronRight, Gauge, Hand, MousePointerClick, Undo2,
+  Scissors, CornerDownLeft, CornerDownRight, XCircle,
 } from 'lucide-react';
 
 interface VideoCanvasProps {
@@ -59,7 +65,8 @@ interface VideoCanvasProps {
   onProcessFrame: (videoEl: HTMLVideoElement, timestamp: number, frameIndex: number) => void;
   historyData: FrameData[];
   onResetData: () => void;
-  onClearTrail: () => void;
+  /** やり直し。実際に消したら true（確認をキャンセルしたら false） */
+  onClearTrail: () => boolean;
   isPlaying: boolean;
   setIsPlaying: (playing: boolean) => void;
   fpsSettings: FpsSettings;
@@ -71,6 +78,9 @@ interface VideoCanvasProps {
   onVideoDuration?: (d: number) => void;
   /** グラフのクリックから届くシーク指示。n は連番（同じ時刻の再指示を拾うため） */
   seekRequest?: { t: number; n: number } | null;
+  /** 解析区間（始点・終点、ファイル上の時刻 [s]） */
+  timeRange: TimeRange;
+  onChangeTimeRange: (r: TimeRange) => void;
 }
 
 /** 軌跡として表示する最大ポイント数（描画負荷の上限） */
@@ -93,6 +103,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   historyData, onResetData, onClearTrail, isPlaying, setIsPlaying,
   fpsSettings, setFpsSettings,
   isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest,
+  timeRange, onChangeTimeRange,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -123,6 +134,13 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const frameTimeRef = useRef(0);
   /** コマ送りの多重実行を防ぐ（連打でシークが交錯すると位置が飛ぶ） */
   const steppingRef = useRef(false);
+  /**
+   * 区間を rVFC のコールバックから読むための ref。
+   * あのコールバックは isPlaying が変わったときにしか作り直さないので、
+   * state を直接掴むと古い区間を見続けてしまう。
+   */
+  const timeRangeRef = useRef(timeRange);
+  timeRangeRef.current = timeRange;
   /** 原点指定モード（ON のあいだ、クリックした点が座標の原点になる） */
   const [originMode, setOriginMode] = useState(false);
 
@@ -194,6 +212,8 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     setOriginMode(false);
     setCorrectMode(false);
     setManualMode(false);
+    // 区間は「この動画の何秒から何秒まで」なので、別の動画では意味を持たない
+    onChangeTimeRange(FULL_RANGE);
     e.target.value = '';
   };
 
@@ -1077,6 +1097,18 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     let rafId: number | null = null;
 
     const step = (mediaTime: number) => {
+      // 終点を越えたら自動で止める。
+      // 「終わりを目で見張って一時停止を押す」操作をなくすためのもので、
+      // 押し遅れて余分なフレームが混ざる事故もこれで消える。
+      const r = timeRangeRef.current;
+      if (r.end !== null && mediaTime > r.end) {
+        v.pause();
+        setIsPlaying(false);
+        frameTimeRef.current = mediaTime;
+        setCurrentTime(mediaTime);
+        return;
+      }
+
       // ここでは fps を計測しない。
       //
       // 以前は再生中の rVFC 間隔から測っていたが、実測で真値のちょうど半分が出た
@@ -1138,37 +1170,141 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   // 再生制御
   // -------------------------------------------------
 
-  const togglePlay = () => {
+  const togglePlay = async () => {
     const v = videoRef.current;
     if (!v || !videoLoaded) return;
     if (isPlaying) {
       v.pause();
       setIsPlaying(false);
-    } else {
-      v.playbackRate = playbackRate;
-      v.play().then(() => setIsPlaying(true)).catch(err => {
-        console.error('[VideoCanvas] 再生できませんでした:', err);
-      });
+      return;
     }
+
+    // 記録できない位置（区間の手前、枠を引いたコマより前、終点より後ろ）から
+    // 再生を始めようとしたら、まず記録が始まる位置へ送る。
+    // そのまま再生すると「再生しているのに点が増えない」という
+    // 分かりにくい状態になる。
+    const st = restartTime;
+    const en = rangeEnd(timeRange, duration);
+    if (v.currentTime < st - 1e-3 || v.currentTime > en - 1e-3) {
+      try {
+        const t = await seekToFrameTime(v, st);
+        frameTimeRef.current = t;
+        setCurrentTime(t);
+      } catch (_) { /* シークに失敗してもそのまま再生を試みる */ }
+    }
+
+    v.playbackRate = playbackRate;
+    v.play().then(() => setIsPlaying(true)).catch(err => {
+      console.error('[VideoCanvas] 再生できませんでした:', err);
+    });
   };
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.playbackRate = playbackRate;
   }, [playbackRate]);
 
-  const handleReset = () => {
+  /**
+   * やり直し — 軌跡を消し、枠を最初に引いた位置へ戻し、記録が始まる時刻へ送る。
+   *
+   * 戻る先は「区間の始点」、無ければ「枠を引いたコマ」、それも無ければ先頭。
+   * 枠を引いたコマより前へ戻しても、そのコマに物体がいないので
+   * テンプレートが作れず、追跡が始まらないため。
+   *
+   * 枠を初期位置へ戻すのは onClearTrail（App 側）が行う。
+   */
+  const handleReset = async () => {
     const v = videoRef.current;
-    if (v) {
-      v.pause();
-      v.currentTime = 0;
-      setCurrentTime(0);
-    }
+    if (v) v.pause();
     setIsPlaying(false);
+
+    // 先に消す。手動点の確認でキャンセルされたら、動画は動かさない
+    // （データが残ったまま始点へ飛ぶと、何が起きたのか分からなくなる）。
+    if (!onClearTrail()) return;
+
+    if (v) {
+      const st = restartTime;
+      try {
+        const t = await seekToFrameTime(v, st);
+        frameTimeRef.current = t;
+        setCurrentTime(t);
+      } catch (_) {
+        v.currentTime = st;
+        setCurrentTime(st);
+      }
+    }
     frameCounterRef.current = 0;
     frameIntervalsRef.current = [];
     lastMediaTimeRef.current = null;
-    onClearTrail();
   };
+
+  // -------------------------------------------------
+  // 解析区間
+  // -------------------------------------------------
+
+  /**
+   * 枠を引いたコマの時刻。
+   *
+   * テンプレートは「枠を引いた瞬間のコマの画」から作られるので、
+   * それより前へ戻して再生しても、そのコマに物体がいなければ追跡は始まらない。
+   * だから「やり直し」で戻る先は 0 秒ではなく、区間の始点か、それが無ければ
+   * 枠を引いたコマになる。
+   */
+  const roiTimes = useMemo(
+    () => objects
+      .filter(o => o.active && o.initialTime !== null)
+      .map(o => o.initialTime as number),
+    [objects]
+  );
+  const roiStartTime = earliestRoiTime(roiTimes);
+  /** 1.5 コマ分。ずれの判定はこれを基準にする */
+  const frameTol = sameFrameTolerance(fpsSettings.value);
+  /** 複数の物体の枠を別々のコマで引いていないか（引いていると片方が破綻する） */
+  const roiSpread = roiTimeSpread(roiTimes);
+  const roiFramesDiffer = roiSpread > frameTol;
+  /** 区間の始点と、枠を引いたコマがずれていないか */
+  const startMismatch =
+    timeRange.start !== null && roiStartTime !== null
+      ? Math.abs(timeRange.start - roiStartTime) > frameTol
+      : false;
+
+  /** 「やり直し」と、記録できない位置から再生を始めたときに戻る先 */
+  const restartTime = restartTimeFor(timeRange, roiTimes);
+
+  /** 「いま画面に出ているフレーム」の時刻。要求時刻ではなく実際の mediaTime */
+  const shownTime = () => frameTimeRef.current || currentTime;
+
+  const setRangeStartHere = () => onChangeTimeRange({ ...timeRange, start: shownTime() });
+  const setRangeEndHere = () => onChangeTimeRange({ ...timeRange, end: shownTime() });
+  const clearRange = () => onChangeTimeRange(FULL_RANGE);
+
+  /** 区間の端へ飛ぶ（指定した位置を目で確かめるため） */
+  const seekTo = useCallback(async (t: number) => {
+    const v = videoRef.current;
+    if (!v || !videoLoaded) return;
+    v.pause();
+    setIsPlaying(false);
+    try {
+      const got = await seekToFrameTime(v, t);
+      frameTimeRef.current = got;
+      setCurrentTime(got);
+    } catch (_) { /* noop */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoLoaded]);
+
+  /** 区間内に入っている記録点の数（少なすぎると自動遮断周波数が不安定になる） */
+  const pointsInRange = useMemo(
+    () => countInRange(historyData, timeRange),
+    [historyData, timeRange]
+  );
+  const rangeActive = hasRange(timeRange);
+  const rangeSpanSec = rangeSpan(timeRange, duration);
+  /** スロー動画では実時間も併記する。ファイル上の秒数だけ見て判断させない */
+  const rangeSpanReal = rangeSpanSec * timeScale(fpsSettings);
+  const tooFewPoints = rangeActive && pointsInRange > 0 && pointsInRange < MIN_RANGE_POINTS;
+  /** シークバー上での位置（0–1）。トラックの左右にはつまみの半分だけ余白がある */
+  const frac = (t: number) => (duration > 0 ? Math.min(1, Math.max(0, t / duration)) : 0);
+  const bandLeft = frac(rangeStart(timeRange));
+  const bandRight = duration > 0 ? frac(rangeEnd(timeRange, duration)) : 1;
 
   // グラフをクリックされたら、その時刻へ移動して止める。
   // 再生したままだとすぐ通り過ぎてしまい、修正できない。
@@ -1552,7 +1688,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             </>
           )}
 
-          <button className="btn btn-secondary" onClick={handleReset} disabled={!videoLoaded} title="先頭に戻して軌跡を消去（枠は保持）">
+          <button className="btn btn-secondary" onClick={handleReset} disabled={!videoLoaded} title="軌跡を消し、枠を最初に引いた位置へ戻して、記録が始まる時刻へ送ります">
             <RotateCcw size={15} />
             やり直し
           </button>
@@ -1584,23 +1720,170 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         </div>
       </div>
 
-      {/* シークバー */}
+      {/* シークバー（区間の帯を重ねて描く） */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <input
-          type="range" min={0} max={duration || 100} step={0.001}
-          value={currentTime}
-          onChange={e => {
-            const t = parseFloat(e.target.value);
-            if (videoRef.current) {
-              videoRef.current.currentTime = t;
-              setCurrentTime(t);
-            }
-          }}
-          disabled={!videoLoaded}
-          style={{ flex: 1 }}
-        />
+        <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center' }}>
+          <input
+            type="range" min={0} max={duration || 100} step={0.001}
+            value={currentTime}
+            onChange={e => {
+              const t = parseFloat(e.target.value);
+              if (videoRef.current) {
+                videoRef.current.currentTime = t;
+                setCurrentTime(t);
+              }
+            }}
+            disabled={!videoLoaded}
+            style={{ flex: 1, width: '100%' }}
+          />
+          {/* 区間の帯。つまみの半分（8px）だけ内側にトラックがあるので合わせる */}
+          {rangeActive && duration > 0 && (
+            <div style={{
+              position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, pointerEvents: 'none',
+            }}>
+              <div style={{
+                position: 'absolute',
+                left: `calc(8px + (100% - 16px) * ${bandLeft})`,
+                width: `calc((100% - 16px) * ${Math.max(0, bandRight - bandLeft)})`,
+                top: '50%', height: 8, transform: 'translateY(-50%)',
+                background: 'rgba(99,102,241,0.35)',
+                borderLeft: timeRange.start !== null ? '2px solid var(--accent-primary)' : 'none',
+                borderRight: timeRange.end !== null ? '2px solid var(--accent-primary)' : 'none',
+                borderRadius: 2,
+              }} />
+            </div>
+          )}
+        </div>
         <span className="mono" style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', flexShrink: 0 }}>
           {currentTime.toFixed(3)} / {duration.toFixed(2)} s
+        </span>
+      </div>
+
+      {/* ---- 解析区間 ---- */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap',
+        padding: '8px 12px', borderRadius: '8px',
+        background: rangeActive ? 'rgba(99,102,241,0.08)' : 'rgba(255,255,255,0.03)',
+        border: `1px solid ${rangeActive ? 'rgba(99,102,241,0.28)' : 'rgba(255,255,255,0.07)'}`,
+      }}>
+        <Scissors size={14} color={rangeActive ? 'var(--accent-primary)' : 'var(--text-muted)'} style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
+          解析区間
+        </span>
+
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={setRangeStartHere}
+          disabled={!videoLoaded}
+          title="いま表示しているフレームを区間の始点にします">
+          <CornerDownRight size={13} />
+          始点にする
+        </button>
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={setRangeEndHere}
+          disabled={!videoLoaded}
+          title="いま表示しているフレームを区間の終点にします。ここで再生が自動停止します">
+          <CornerDownLeft size={13} />
+          終点にする
+        </button>
+        {rangeActive && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={clearRange}
+            disabled={!videoLoaded}
+            title="区間を解除して動画全体に戻します">
+            <XCircle size={13} />
+            解除
+          </button>
+        )}
+
+        <span className="mono" style={{ fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+          {timeRange.start !== null ? (
+            <button
+              className="btn btn-secondary btn-sm"
+              style={{ padding: '2px 6px', fontSize: '0.72rem' }}
+              onClick={() => seekTo(timeRange.start as number)}
+              title="始点へ移動して確認します">
+              {timeRange.start.toFixed(3)} s
+            </button>
+          ) : '先頭'}
+          {' 〜 '}
+          {timeRange.end !== null ? (
+            <button
+              className="btn btn-secondary btn-sm"
+              style={{ padding: '2px 6px', fontSize: '0.72rem' }}
+              onClick={() => seekTo(timeRange.end as number)}
+              title="終点へ移動して確認します">
+              {timeRange.end.toFixed(3)} s
+            </button>
+          ) : '末尾'}
+          {rangeActive && rangeSpanSec > 0 && (
+            <>
+              {'  '}（{rangeSpanSec.toFixed(3)} s
+              {Math.abs(rangeSpanReal - rangeSpanSec) > 1e-6 && ` / 実時間 ${rangeSpanReal.toFixed(3)} s`}
+              {historyData.length > 0 && `・${pointsInRange} 点`}）
+            </>
+          )}
+        </span>
+
+        {/* 枠を引いたコマと区間の始点がずれていると、始点のコマに物体がいない。
+            気づかないと「再生しても点が増えない」で詰まるので、直す手段ごと出す。 */}
+        {(startMismatch || roiFramesDiffer) && (
+          <div style={{
+            flexBasis: '100%', display: 'flex', alignItems: 'center', gap: 10,
+            flexWrap: 'wrap', fontSize: '0.74rem', color: '#fcd34d', lineHeight: 1.55,
+          }}>
+            <span style={{ flex: 1, minWidth: 240 }}>
+              {startMismatch && roiStartTime !== null && timeRange.start !== null && (
+                <>
+                  ⚠ 枠を引いたのは {roiStartTime.toFixed(3)} s のコマですが、区間の始点は
+                  {' '}{timeRange.start.toFixed(3)} s です。テンプレートは枠を引いた瞬間のコマの画から
+                  作られるので、始点のコマに物体がいないと追跡が始まりません。{' '}
+                </>
+              )}
+              {roiFramesDiffer && (
+                <>
+                  ⚠ 物体ごとに別のコマで枠を引いています（差 {roiSpread.toFixed(3)} s）。
+                  同じコマまで戻して引き直してください。片方は必ず外れます。
+                </>
+              )}
+            </span>
+            {startMismatch && roiStartTime !== null && (
+              <button
+                className="btn btn-warning btn-sm"
+                onClick={() => onChangeTimeRange({ ...timeRange, start: roiStartTime })}
+                title="枠を引いたコマを区間の始点にそろえます">
+                枠のコマを始点にする
+              </button>
+            )}
+          </div>
+        )}
+
+        <span style={{
+          fontSize: '0.72rem', color: tooFewPoints ? '#fcd34d' : 'var(--text-muted)',
+          lineHeight: 1.5, flexBasis: '100%',
+        }}>
+          {tooFewPoints ? (
+            <>
+              ⚠ 区間内が {pointsInRange} 点しかありません。{MIN_RANGE_POINTS} 点を切ると
+              Butterworth の遮断周波数の自動選択が不安定になります。区間を広げてください。
+            </>
+          ) : rangeActive ? (
+            <>
+              区間外は追跡も記録もしません。終点で自動停止します。
+              グラフ・フィルタ・CSV もこの区間だけを使います。
+              {historyData.length > 0 &&
+                ' 取り直すときは「やり直し」を押してください（軌跡を消し、枠を最初の位置へ戻して始点へ送ります）。'}
+            </>
+          ) : (
+            <>
+              頭の準備時間や着地後の跳ね返りを外すと、フィルタの自動遮断周波数が
+              運動区間だけを見るようになり、数値が安定します（任意）。
+              {roiStartTime !== null &&
+                ` いまは枠を引いた ${roiStartTime.toFixed(3)} s のコマが、やり直しで戻る先です。`}
+            </>
+          )}
         </span>
       </div>
 
@@ -1613,9 +1896,13 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         <Crosshair size={14} color="var(--accent-primary)" style={{ flexShrink: 0, marginTop: '2px' }} />
         <span>
           選択中: <b style={{ color: objects.find(o => o.id === selectedObjId)?.color || 'var(--text-primary)' }}>{selectedObjId}</b>
-          {' '}— 白シールを囲むようにドラッグして追跡枠を指定。
-          <b>枠は {RECOMMENDED_ROI_SIZE}px 以上</b>（シールの周りの模様が少し入るくらい）にしてください。
-          小さすぎる枠は画面のどこにでも一致してしまい、軌跡が暴走します。
+          {' '}— マーカーを囲むようにドラッグして追跡枠を指定。
+          <b>枠は {RECOMMENDED_ROI_SIZE}px 以上</b>にしてください。小さすぎる枠は画面のどこにでも
+          一致してしまい、軌跡が暴走します。
+          {' '}<b>枠の中は、マーカーと一緒に動くものだけで埋めてください。</b>
+          物体の面が広ければ枠を大きく取って構いませんが、動かない背景が入るぶんだけ
+          精度が落ちます（合成データで実測。背景が入ると誤差が 13 倍）。
+          背景を避けられない対象では、枠をマーカーぎりぎりまで詰めるのが正解です。
           {lostObjects.length > 0 && (
             <span style={{ color: '#ef4444', fontWeight: 600 }}> ⚠ LOST: {lostObjects.map(o => o.id).join(', ')} — 再指定してください</span>
           )}

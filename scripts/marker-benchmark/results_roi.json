@@ -1,0 +1,402 @@
+[
+ {
+  "marker": "white_dot",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": false,
+  "rms": 0.07533601069400349,
+  "fail_rate": 0.0,
+  "margin": 0.54365436454614,
+  "score": 0.9808915221691131
+ },
+ {
+  "marker": "white_dot",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": false,
+  "rms": 0.14318786564066296,
+  "fail_rate": 0.0,
+  "margin": 0.43017608404159546,
+  "score": 0.9839628835519155
+ },
+ {
+  "marker": "white_dot",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": false,
+  "rms": 0.279557625243689,
+  "fail_rate": 0.0,
+  "margin": 0.3562853900591532,
+  "score": 0.983758530219396
+ },
+ {
+  "marker": "white_dot",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": false,
+  "rms": 0.4381290657893466,
+  "fail_rate": 0.0,
+  "margin": 0.28538777073224386,
+  "score": 0.9822703309853872
+ },
+ {
+  "marker": "white_dot",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": false,
+  "rms": 0.6310479907137744,
+  "fail_rate": 0.013333333333333308,
+  "margin": 0.3087785013516744,
+  "score": 0.9793923632303874
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": false,
+  "rms": 0.014108901699783103,
+  "fail_rate": 0.0,
+  "margin": 0.372306805451711,
+  "score": 0.9898841055234273
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": false,
+  "rms": 0.02180984146059537,
+  "fail_rate": 0.0,
+  "margin": 0.39582638382911683,
+  "score": 0.9861502408981323
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": false,
+  "rms": 0.06512995931007963,
+  "fail_rate": 0.0,
+  "margin": 0.4206995213031769,
+  "score": 0.9823073391119639
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": false,
+  "rms": 0.14304895664531578,
+  "fail_rate": 0.0,
+  "margin": 0.4962133079767227,
+  "score": 0.975249836842219
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": false,
+  "rms": 0.20828407479965358,
+  "fail_rate": 0.0,
+  "margin": 0.5565140569210052,
+  "score": 0.9682487372557322
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": false,
+  "rms": 0.03702397667113981,
+  "fail_rate": 0.0,
+  "margin": 0.4892145129044851,
+  "score": 0.9895204289754231
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": false,
+  "rms": 0.045056809058647056,
+  "fail_rate": 0.0,
+  "margin": 0.5289578890800476,
+  "score": 0.9871106604735057
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": false,
+  "rms": 0.1246169140241027,
+  "fail_rate": 0.0,
+  "margin": 0.6225264497598012,
+  "score": 0.9805675578117371
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": false,
+  "rms": 0.20949588634585092,
+  "fail_rate": 0.0,
+  "margin": 0.6357033973932267,
+  "score": 0.9741000203291575
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": false,
+  "rms": 0.3491458064013911,
+  "fail_rate": 0.0,
+  "margin": 0.652233398159345,
+  "score": 0.9659964716434479
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": false,
+  "rms": 0.018241490630480382,
+  "fail_rate": 0.0,
+  "margin": 0.5864527740081151,
+  "score": 0.9814001329739889
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": false,
+  "rms": 0.04918059767697135,
+  "fail_rate": 0.0,
+  "margin": 0.6784713900089264,
+  "score": 0.9793644853432973
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": false,
+  "rms": 0.08451424224657894,
+  "fail_rate": 0.0,
+  "margin": 0.754724214176337,
+  "score": 0.9729385916392008
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": false,
+  "rms": 0.15988787567872534,
+  "fail_rate": 0.0,
+  "margin": 0.7723054136832556,
+  "score": 0.9662231330076854
+ },
+ {
+  "marker": "bullseye",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": false,
+  "rms": 0.217398668119122,
+  "fail_rate": 0.0,
+  "margin": 0.7814201470216116,
+  "score": 0.9612049829959869
+ },
+ {
+  "marker": "white_dot",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": true,
+  "rms": 0.021778518015083282,
+  "fail_rate": 0.0,
+  "margin": 0.551965337395668,
+  "score": 0.9892036588986715
+ },
+ {
+  "marker": "white_dot",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": true,
+  "rms": 0.01231926334563418,
+  "fail_rate": 0.0,
+  "margin": 0.43739370505015057,
+  "score": 0.9928490567207336
+ },
+ {
+  "marker": "white_dot",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": true,
+  "rms": 0.01261516395266343,
+  "fail_rate": 0.0,
+  "margin": 0.3343573935826619,
+  "score": 0.9946070480346679
+ },
+ {
+  "marker": "white_dot",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": true,
+  "rms": 0.011290569528745064,
+  "fail_rate": 0.0,
+  "margin": 0.284281298716863,
+  "score": 0.9950747311115264
+ },
+ {
+  "marker": "white_dot",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": true,
+  "rms": 0.010522704519623848,
+  "fail_rate": 0.0,
+  "margin": 0.2602279535929362,
+  "score": 0.9951189303398132
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": true,
+  "rms": 0.011096485454501651,
+  "fail_rate": 0.0,
+  "margin": 0.4227145246664683,
+  "score": 0.989416089852651
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": true,
+  "rms": 0.011677021867587373,
+  "fail_rate": 0.0,
+  "margin": 0.3941776653130849,
+  "score": 0.9876872026920318
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": true,
+  "rms": 0.0100586061051697,
+  "fail_rate": 0.0,
+  "margin": 0.35522972941398623,
+  "score": 0.9892302958170572
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": true,
+  "rms": 0.010261805477198514,
+  "fail_rate": 0.0,
+  "margin": 0.4673093100388845,
+  "score": 0.9894097153345743
+ },
+ {
+  "marker": "cross_thick",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": true,
+  "rms": 0.010589214424930622,
+  "fail_rate": 0.0,
+  "margin": 0.5483839068810145,
+  "score": 0.9886477184295654
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": true,
+  "rms": 0.012843954376233348,
+  "fail_rate": 0.0,
+  "margin": 0.44769295771916706,
+  "score": 0.991541155576706
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": true,
+  "rms": 0.011518786675494476,
+  "fail_rate": 0.0,
+  "margin": 0.4582417857646942,
+  "score": 0.9910676058133443
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": true,
+  "rms": 0.010770364285654402,
+  "fail_rate": 0.0,
+  "margin": 0.529477833310763,
+  "score": 0.9915567831198374
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": true,
+  "rms": 0.010219674171624131,
+  "fail_rate": 0.0,
+  "margin": 0.592460954785347,
+  "score": 0.9902558902899424
+ },
+ {
+  "marker": "quad_circle",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": true,
+  "rms": 0.011183245633084914,
+  "fail_rate": 0.0,
+  "margin": 0.5708450684944789,
+  "score": 0.9895745412508646
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.0,
+  "roi_px": 30,
+  "on_object": true,
+  "rms": 0.010035370381678052,
+  "fail_rate": 0.0,
+  "margin": 0.6871330426136653,
+  "score": 0.9830425473054251
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.15,
+  "roi_px": 34,
+  "on_object": true,
+  "rms": 0.009146047493202282,
+  "fail_rate": 0.0,
+  "margin": 0.7525852925578753,
+  "score": 0.9849618017673493
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.4,
+  "roi_px": 42,
+  "on_object": true,
+  "rms": 0.008577481229542046,
+  "fail_rate": 0.0,
+  "margin": 0.7983614961306255,
+  "score": 0.9865802307923635
+ },
+ {
+  "marker": "bullseye",
+  "factor": 1.7,
+  "roi_px": 52,
+  "on_object": true,
+  "rms": 0.008505608819545252,
+  "fail_rate": 0.0,
+  "margin": 0.7757948515812556,
+  "score": 0.9870596253871917
+ },
+ {
+  "marker": "bullseye",
+  "factor": 2.0,
+  "roi_px": 60,
+  "on_object": true,
+  "rms": 0.008438933374773815,
+  "fail_rate": 0.0,
+  "margin": 0.767861884534359,
+  "score": 0.9862457545598348
+ }
+]
