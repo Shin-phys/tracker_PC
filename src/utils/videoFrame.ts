@@ -49,6 +49,11 @@ type RvfcVideo = HTMLVideoElement & {
  * @param video   対象の video 要素
  * @param target  シークしたい時刻 [s]（動画の範囲へ丸める）
  * @param timeoutMs 応答が無いときに諦めるまでの時間
+ * @param graceMs seeked のあと rVFC を待つ猶予。ここで待ち切れないと
+ *                「実フレーム時刻」ではなく「要求した時刻」で確定してしまい、
+ *                記録される時刻が 1 コマ未満ずれる。コマ送りのように
+ *                手応えが要る場面では短く、全コマ処理のように
+ *                精度が優先される場面では長く取る
  * @returns 表示されたフレームの mediaTime [s]
  *
  * 注意: 再生中は rVFC が毎フレーム発火して別のコマを掴んでしまうので、
@@ -57,7 +62,8 @@ type RvfcVideo = HTMLVideoElement & {
 export function seekToFrameTime(
   video: HTMLVideoElement,
   target: number,
-  timeoutMs = 600
+  timeoutMs = 600,
+  graceMs = GRACE_MS
 ): Promise<number> {
   const v = video as RvfcVideo;
 
@@ -97,7 +103,7 @@ export function seekToFrameTime(
       // コマ送りが 1 回ごとに固まって手動トラッキングに使えない。
       // seeked が来た時点で短い猶予だけ与え、来なければ currentTime で確定する。
       if (timer !== null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => finish(v.currentTime), GRACE_MS);
+      timer = window.setTimeout(() => finish(v.currentTime), graceMs);
     }
 
     // rVFC は currentTime を書く前に登録する。

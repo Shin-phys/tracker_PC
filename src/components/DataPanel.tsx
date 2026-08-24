@@ -16,7 +16,7 @@ import {
   applySavitzkyGolay, sgWindowSeconds, recommendSgWindow, SG_WINDOW_WARN_SEC,
 } from '../utils/savitzkyGolay';
 import { autoFilter, butterworthZeroPhase, derivative, medianDt } from '../utils/butterworth';
-import { isCalibrated } from '../utils/calibration';
+import { outputUnit } from '../utils/calibration';
 import { smoothSeries } from '../utils/graphSmooth';
 import {
   TimeRange, clipToRange, hasRange, MIN_RANGE_POINTS,
@@ -102,7 +102,8 @@ export const DataPanel: React.FC<DataPanelProps> = ({
   }, [graphFull]);
 
   /** 未校正なら px 表記にフォールバック（plane モードは pxPerUnit を使わない） */
-  const unitLabel = isCalibrated(calibration) ? calibration.unit : 'px';
+  // 出力は m に統一する（校正の入力単位が cm でも、記録される値は m）
+  const unitLabel = outputUnit(calibration);
 
   // -------------------------------------------------
   // Savitzky-Golay フィルタ適用
@@ -294,7 +295,7 @@ export const DataPanel: React.FC<DataPanelProps> = ({
     // 動的ヘッダー生成
     const headers: string[] = ['Timestamp(s)'];
 
-    const u = isCalibrated(calibration) ? calibration.unit : 'px';
+    const u = outputUnit(calibration);
 
     activeObjects.forEach(obj => {
       headers.push(
@@ -365,6 +366,51 @@ export const DataPanel: React.FC<DataPanelProps> = ({
     const a = document.createElement('a');
     a.href = url;
     a.download = `motion_trace_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // -------------------------------------------------
+  // 位置だけの CSV（平滑化前の生の値）
+  // -------------------------------------------------
+  //
+  // 速度を自分で求める過程そのものが学習の中身なので、こちらでは
+  // 速度も加速度も出さない。平滑化もかけない。
+  //
+  // 生の値にしている理由
+  //   平滑化後の位置を渡すと、そこから求めた速度は「こちらのフィルタの
+  //   結果」を引き継いだものになる。差分を取るとなぜノイズが荒れるのか、
+  //   なぜ平滑化が要るのかを、手を動かして確かめられなくなる。
+  //   そのぶん、この CSV の値は画面のグラフとは一致しない。
+
+  const downloadPositionCSV = () => {
+    if (historyData.length === 0) return;
+
+    const scale = timeScale(fpsSettings);
+    const u = outputUnit(calibration);
+
+    const headers = [
+      'Timestamp(s)',
+      ...activeObjects.flatMap(o => [`${o.id}_X(${u})`, `${o.id}_Y(${u})`]),
+    ];
+    const rows: string[] = [headers.join(',')];
+
+    historyData.forEach(fd => {
+      const row: string[] = [(fd.timestamp * scale).toFixed(6)];
+      activeObjects.forEach(o => {
+        const it = fd.objects[o.id];
+        // 見失ったコマは空欄にする。0 を入れると原点に居たように読めてしまう
+        if (!it || it.lost) row.push('', '');
+        else row.push(it.xM.toFixed(6), it.yM.toFixed(6));
+      });
+      rows.push(row.join(','));
+    });
+
+    const blob = new Blob(['\uFEFF' + rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `motion_position_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -929,6 +975,33 @@ export const DataPanel: React.FC<DataPanelProps> = ({
           <Download size={18} />
           CSV ダウンロード ({processedData.length} フレーム)
         </button>
+
+        <button
+          className="btn btn-secondary"
+          onClick={downloadPositionCSV}
+          disabled={historyData.length === 0}
+          style={{ width: '100%', padding: '10px', fontSize: '0.86rem', justifyContent: 'center', marginTop: '8px' }}
+          title="時刻と位置だけの CSV。速度は入っていません"
+        >
+          <Download size={16} />
+          位置だけの CSV ({historyData.length} フレーム)
+        </button>
+
+        <div
+          style={{
+            marginTop: '8px', padding: '9px 12px', borderRadius: '8px',
+            fontSize: '0.75rem', lineHeight: 1.7, color: 'var(--text-secondary)',
+            background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.18)',
+          }}
+        >
+          <b style={{ color: 'var(--text-primary)' }}>位置だけの CSV</b> は
+          <b>時刻と x, y だけ</b>を出します。速度も加速度も入っていないので、
+          表計算で自分で求められます。
+          <b style={{ color: '#fcd34d' }}> 平滑化はかけていません。</b>
+          差分を取るとノイズがどれだけ荒れるか、なぜ平滑化が要るのかを、
+          そのまま確かめられるようにするためです。
+          そのぶん、この値は上のグラフや通常の CSV とは一致しません。
+        </div>
 
         {processedData.length > 0 && (
           <div

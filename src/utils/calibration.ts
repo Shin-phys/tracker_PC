@@ -57,19 +57,36 @@ export const recalcScale = (
 };
 
 /**
- * 画像座標 → 実寸座標。
+ * 出力を m にそろえるための係数。
+ *
+ * 基準の長さは cm や mm で入力してもらうほうが自然（A4 なら 29.7cm）だが、
+ * 記録に残る数値は m に統一する。速度が m/s、加速度が m/s² になり、
+ * 教科書の式にそのまま入る。CSV とグラフと計測値で桁が食い違うこともなくなる。
+ *
+ * 未校正のときは px をそのまま扱うので 1 を返す（px を 0.01 倍しても意味がない）。
+ */
+export const metersPerUnit = (calib: ScaleCalibration): number =>
+  isCalibrated(calib) ? UNIT_TO_M[calib.unit] : 1;
+
+/** 記録・出力に使う単位の表示名。校正済みなら m、未校正なら px */
+export const outputUnit = (calib: ScaleCalibration): string =>
+  isCalibrated(calib) ? 'm' : 'px';
+
+/**
+ * 画像座標 → 実寸座標 [m]。
  * plane モードでは射影変換、それ以外は一定倍率。
  * 未校正のときは px をそのまま返す（px 単位で記録できる）。
  */
 export const toReal = (calib: ScaleCalibration, p: Point, imageHeight = 0): Point => {
+  const k = metersPerUnit(calib);
   if (calib.mode === 'plane' && calib.homography) {
     const Hm = calib.homography as Matrix3;
     const q = applyHomography(Hm, p);
-    if (!calib.origin) return q;
+    if (!calib.origin) return { x: q.x * k, y: q.y * k };
     // plane モードでは、原点も同じ射影変換で実寸へ移してから引く。
     // 画像座標のまま引くと、遠近のかかり方が場所ごとに違うので合わない。
     const o = applyHomography(Hm, calib.origin);
-    return { x: q.x - o.x, y: q.y - o.y };
+    return { x: (q.x - o.x) * k, y: (q.y - o.y) * k };
   }
   const s = calib.pxPerUnit > 0 ? calib.pxPerUnit : 1;
   // 原点が未設定なら従来どおり画像の左上（yUp なら左下）を基準にする
@@ -78,14 +95,18 @@ export const toReal = (calib: ScaleCalibration, p: Point, imageHeight = 0): Poin
     ? calib.origin.y
     : (calib.yUp && imageHeight > 0 ? imageHeight : 0);
   return {
-    x: (p.x - ox) / s,
+    x: ((p.x - ox) / s) * k,
     // yUp のときは上向きが正になるよう向きを反転する
-    y: calib.yUp ? (oy - p.y) / s : (p.y - oy) / s,
+    y: (calib.yUp ? (oy - p.y) / s : (p.y - oy) / s) * k,
   };
 };
 
-/** 実寸座標 → 画像座標（校正の検証表示などに使う） */
+/** 実寸座標 [m] → 画像座標（校正の検証表示などに使う）。toReal の逆 */
 export const toImage = (calib: ScaleCalibration, p: Point, imageHeight = 0): Point | null => {
+  const k = metersPerUnit(calib);
+  // toReal が最後に掛けた分をここで戻す
+  const px = p.x / k;
+  const py = p.y / k;
   if (calib.mode === 'plane' && calib.homography) {
     const Hm = calib.homography as Matrix3;
     const inv = invertHomography(Hm);
@@ -93,7 +114,7 @@ export const toImage = (calib: ScaleCalibration, p: Point, imageHeight = 0): Poi
     const o = calib.origin
       ? applyHomography(Hm, calib.origin)
       : { x: 0, y: 0 };
-    return applyHomography(inv, { x: p.x + o.x, y: p.y + o.y });
+    return applyHomography(inv, { x: px + o.x, y: py + o.y });
   }
   const s = calib.pxPerUnit > 0 ? calib.pxPerUnit : 1;
   const ox = calib.origin ? calib.origin.x : 0;
@@ -101,8 +122,8 @@ export const toImage = (calib: ScaleCalibration, p: Point, imageHeight = 0): Poi
     ? calib.origin.y
     : (calib.yUp && imageHeight > 0 ? imageHeight : 0);
   return {
-    x: p.x * s + ox,
-    y: calib.yUp ? oy - p.y * s : p.y * s + oy,
+    x: px * s + ox,
+    y: calib.yUp ? oy - py * s : py * s + oy,
   };
 };
 

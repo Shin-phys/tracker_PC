@@ -785,6 +785,7 @@ export const App: React.FC = () => {
             historyData={historyData}
             onResetData={handleResetData}
             onClearTrail={handleClearTrail}
+            onFlushHistory={() => flushHistory(true)}
             isPlaying={isPlaying}
             setIsPlaying={setIsPlaying}
             fpsSettings={fpsSettings}
