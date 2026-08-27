@@ -212,7 +212,7 @@ export const DEFAULT_TRACKING: TrackingSettings = {
   markerMode: 'white',
   centroidLevel: 0.5,
   lostThreshold: 0.45,
-  searchScale: 1.8,
+  searchScale: 1.2,
   exitMargin: 2,
   stopOnExit: true,
 };

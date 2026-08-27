@@ -23,7 +23,7 @@
 //   区間の判定には影響しない。
 // ============================================================
 
-import { FrameData } from '../types';
+import { FrameData, Point } from '../types';
 
 /** 始点・終点。null は「指定なし」＝動画の端を意味する */
 export interface TimeRange {
@@ -147,6 +147,36 @@ export function roiTimeSpread(roiTimes: number[]): number {
  */
 export function sameFrameTolerance(fps: number): number {
   return 1.5 / (fps > 0 ? fps : 30);
+}
+
+/**
+ * 記録済みの軌跡から「その時刻にその物体がいた位置」を取り出す。
+ *
+ * なぜ必要か
+ *   やり直しは枠を initialRoi（最初に引いた位置）へ戻すが、戻る先のコマが
+ *   枠を引いたコマと違うと、枠だけが別の場所に取り残される。
+ *   区間の始点を後から動かした場合や、物体ごとに別のコマで枠を置いた場合に
+ *   必ず起きる（枠は最初に置いた場所へ、動画は始点のコマへ、と別々に飛ぶ）。
+ *   直前の走行の軌跡が残っていれば、そのコマで物体がいた位置は分かっている。
+ *   枠はそこへ戻すのが正しい。
+ *
+ * @param tol 同じコマとみなす許容差 [s]。これを超えて離れていたら諦める
+ * @returns 見つからなければ null（そのコマでロストしていた場合も null）
+ */
+export function trackedPointAt(
+  data: FrameData[], objId: string, t: number, tol: number
+): Point | null {
+  let best: FrameData | null = null;
+  let bestD = Infinity;
+  for (const fd of data) {
+    const it = fd.objects[objId];
+    if (!it || it.lost) continue;
+    const d = Math.abs(fd.timestamp - t);
+    if (d < bestD) { bestD = d; best = fd; }
+  }
+  if (!best || bestD > tol) return null;
+  const it = best.objects[objId];
+  return { x: it.xPx, y: it.yPx };
 }
 
 /** 表示用の秒数（小数 3 桁） */

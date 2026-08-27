@@ -66,8 +66,10 @@ interface VideoCanvasProps {
   onProcessFrame: (videoEl: HTMLVideoElement, timestamp: number, frameIndex: number) => void;
   historyData: FrameData[];
   onResetData: () => void;
-  /** やり直し。実際に消したら true（確認をキャンセルしたら false） */
-  onClearTrail: () => boolean;
+  /** やり直し。実際に消したら true（確認をキャンセルしたら false）。
+   *  引数は「戻る先の時刻」。軌跡が残っていれば、そのコマで物体がいた
+   *  位置へ枠を戻すのに使う。 */
+  onClearTrail: (restartAt?: number | null) => boolean;
   /** 記録を即座に画面へ反映させる（全コマ処理の最後で使う） */
   onFlushHistory?: () => void;
   isPlaying: boolean;
@@ -1231,7 +1233,10 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
    * 枠を引いたコマより前へ戻しても、そのコマに物体がいないので
    * テンプレートが作れず、追跡が始まらないため。
    *
-   * 枠を初期位置へ戻すのは onClearTrail（App 側）が行う。
+   * 枠を戻すのは onClearTrail（App 側）が行う。戻る先の時刻を渡すのは、
+   * 直前の軌跡が残っていれば「そのコマで物体がいた位置」へ枠を戻せるため。
+   * 区間の始点を後から動かしたときに、枠だけが最初に引いた場所へ取り残されて
+   * 「やり直すたびに枠を置き直す」ことになるのを防ぐ。
    */
   const handleReset = async () => {
     const v = videoRef.current;
@@ -1240,7 +1245,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
     // 先に消す。手動点の確認でキャンセルされたら、動画は動かさない
     // （データが残ったまま始点へ飛ぶと、何が起きたのか分からなくなる）。
-    if (!onClearTrail()) return;
+    if (!onClearTrail(restartTime)) return;
 
     if (v) {
       const st = restartTime;
@@ -2017,7 +2022,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
               区間外は追跡も記録もしません。終点で自動停止します。
               グラフ・フィルタ・CSV もこの区間だけを使います。
               {historyData.length > 0 &&
-                ' 取り直すときは「やり直し」を押してください（軌跡を消し、枠を最初の位置へ戻して始点へ送ります）。'}
+                ' 取り直すときは「やり直し」を押してください（軌跡を消し、枠を始点のコマの位置へ戻して始点へ送ります）。'}
             </>
           ) : (
             <>

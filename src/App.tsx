@@ -14,7 +14,9 @@ import {
   placeManualPoint, undoManualPoint, isFrameComplete, ManualEdit,
   countManualPoints,
 } from './utils/manualTrack';
-import { TimeRange, FULL_RANGE, inRange, normalizeRange } from './utils/timeRange';
+import {
+  TimeRange, FULL_RANGE, inRange, normalizeRange, trackedPointAt,
+} from './utils/timeRange';
 
 import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
@@ -550,13 +552,20 @@ export const App: React.FC = () => {
   }, []);
 
   /**
-   * やり直し — 軌跡を消して、枠を「最初に引いた位置」へ戻す。
+   * やり直し — 軌跡を消して、枠を「戻る先のコマで物体がいた位置」へ戻す。
    *
    * roi は追跡中に毎フレーム上書きされるので、そのまま残すと
    * 物体が最後に到達した位置の枠が残る。巻き戻して再生すると
    * そこでテンプレートが作り直され、物体がいないので即座に破綻する。
-   * initialRoi へ戻すことで、何度でも同じ条件で取り直せる
-   * ＝ 同じ区間・同じ初期枠なら毎回同じ数値が出る。
+   *
+   * 戻す先の決め方
+   *   1. restartAt（＝やり直しで戻る先の時刻）が渡されていて、消す前の軌跡に
+   *      そのコマの点が残っていれば、枠の大きさは変えずにそこへ移す。
+   *      区間の始点を後から動かした場合や、物体ごとに別のコマで枠を置いた
+   *      場合、initialRoi へ戻すと枠だけが別の場所に取り残される。
+   *      それが「やり直すたびに枠を置き直す」羽目になる原因だった。
+   *   2. 軌跡がまだ無い（1 回目のやり直し）ときは initialRoi へ戻す。
+   *      これで、同じ区間・同じ初期枠なら毎回同じ数値が出る性質は保たれる。
    *
    * 手動で打った点も消えるので、点があるときだけ確認する。
    * 手動記録は数十回のクリックの積み上げで、取り消しが高くつく。
@@ -565,7 +574,7 @@ export const App: React.FC = () => {
    * これを見てからシークするので、確認をキャンセルすると
    * 「データは残っているのに動画だけ始点へ飛んだ」状態にならない。
    */
-  const handleClearTrail = useCallback((): boolean => {
+  const handleClearTrail = useCallback((restartAt?: number | null): boolean => {
     const manualCount = countManualPoints(historyDataRef.current);
     if (manualCount > 0) {
       const ok = window.confirm(
@@ -573,27 +582,53 @@ export const App: React.FC = () => {
       );
       if (!ok) return false;
     }
+    // 枠を戻す位置は、消す前の軌跡から決める。
+    // 戻る先のコマで物体がいた位置が分かるなら、枠は「最初に引いた場所」ではなく
+    // そこへ戻す。そうしないと、区間の始点を後から動かしたときや、物体ごとに
+    // 別のコマで枠を置いたときに、枠だけが別の場所に取り残される。
+    const before = historyDataRef.current;
+    const tol = frameTolerance() * 3;   // 1.5 コマ分
+    const backTo = new Map<string, Point | null>();
+    objectsRef.current.forEach(o => {
+      backTo.set(
+        o.id,
+        restartAt != null ? trackedPointAt(before, o.id, restartAt, tol) : null
+      );
+    });
+
     historyDataRef.current = [];
     lastFlushRef.current = 0;
     setHistoryData([]);
     Object.values(trackersRef.current).forEach(t => t.cleanup());
     trackersRef.current = {};
-    setObjects(prev =>
-      prev.map(o => (
-        o.roi || o.initialRoi
-          ? {
-              ...o,
-              status: 'idle' as ObjectStatus,
-              // 初期位置を覚えていればそこへ戻す。
-              // 覚えていない（手動記録だけで使った）場合は今の枠のまま。
-              roi: o.initialRoi ?? o.roi,
-              center: null,
-            }
-          : o
-      ))
-    );
+    setObjects(prev => prev.map(o => {
+      // 初期位置を覚えていない（手動記録だけで使った）場合は今の枠のまま
+      const base = o.initialRoi ?? o.roi;
+      if (!base) return o;
+      const p = backTo.get(o.id) ?? null;
+      // 戻る先のコマでの位置が分かるなら、枠の大きさは変えずにそこへ移す。
+      // 初期位置も一緒に更新する。更新しないと、次のやり直しでまた
+      // 「最初に引いた位置」へ跳ね返ってしまう。
+      const roi: Rect = p
+        ? {
+            x: p.x - base.width / 2,
+            y: p.y - base.height / 2,
+            width: base.width,
+            height: base.height,
+          }
+        : base;
+      return {
+        ...o,
+        status: 'idle' as ObjectStatus,
+        roi,
+        center: null,
+        ...(p && restartAt != null
+          ? { initialRoi: roi, initialTime: restartAt }
+          : {}),
+      };
+    }));
     return true;
-  }, []);
+  }, [frameTolerance]);
 
   // -------------------------------------------------
   // フレーム処理（VideoCanvas の requestVideoFrameCallback から呼ばれる）
