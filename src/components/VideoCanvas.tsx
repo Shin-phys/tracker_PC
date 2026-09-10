@@ -38,7 +38,8 @@ import {
   recommendManualStep, MANUAL_INTERVAL_WARN,
 } from '../utils/manualTrack';
 import { timeScale } from '../utils/timeScale';
-import { drawCrosshair } from '../utils/overlay';
+import { drawCrosshair, drawCalibPoint } from '../utils/overlay';
+import { checkTrack } from '../utils/frameCheck';
 import {
   TimeRange, FULL_RANGE, hasRange, rangeStart, rangeEnd, rangeSpan,
   countInRange, MIN_RANGE_POINTS,
@@ -680,6 +681,28 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   // Canvas 描画
   // -------------------------------------------------
 
+  // =========================================================
+  // コマの点検
+  // =========================================================
+  //
+  // 位置の 2 階差分が一定かどうかを見る。等加速度ならこれは一定になるので、
+  // 飛んでいるコマは「動画側のコマの時刻ずれ」か「追跡の失敗」のどちらか。
+  // 速度に直してから探すと、微分がノイズを増幅し、中心差分のせいで
+  // 1 コマの異常が前後 2 点へ散るため、原因のコマが特定できない。
+
+  /** 点検に使う枠の幅。ブレの限界の判定に効く */
+  const checkRoiWidth = useMemo(() => {
+    const o = objects.find(x => x.id === selectedObjId);
+    return o?.initialRoi?.width ?? o?.roi?.width ?? 0;
+  }, [objects, selectedObjId]);
+
+  const trackQuality = useMemo(
+    () => checkTrack(historyData, selectedObjId, checkRoiWidth),
+    [historyData, selectedObjId, checkRoiWidth]
+  );
+  /** 疑わしいコマの時刻。描画で印を付けるのに使う */
+  const issueTimes = useMemo(() => new Set(trackQuality.issueTimes), [trackQuality]);
+
   const renderFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -747,6 +770,31 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         strokeSegments('rgba(0,0,0,0.45)', 4.5 * k);
         strokeSegments(obj.color, 2.5 * k);
         ctx.restore();
+
+
+        // タイミングの乱れたコマに印を付ける。
+        // 点そのものは消さない。消すと「無かったこと」になり、なぜ速度が
+        // 暴れているのかを説明できなくなる。見せたうえで判断してもらう。
+        if (obj.id === selectedObjId && issueTimes.size > 0) {
+          for (let i = 0; i < historyData.length; i++) {
+            const it = historyData[i].objects[obj.id];
+            if (!it || it.lost) continue;
+            if (!issueTimes.has(historyData[i].timestamp)) continue;
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(it.xPx, it.yPx, 8 * k, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+            ctx.lineWidth = 3.2 * k;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(it.xPx, it.yPx, 8 * k, 0, Math.PI * 2);
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 1.6 * k;
+            ctx.setLineDash([3.5 * k, 2.5 * k]);
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
 
         // 手動修正した点を目印として出す
         for (let i = 0; i < historyData.length; i++) {
@@ -872,15 +920,11 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       ctx.lineWidth = 2.5 * k;
       ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
 
-      // 端点ハンドル
+      // 端点。中を塗らない。塗ると狙っている目盛りが自分の描画で隠れ、
+      // 終点を目分量で置くことになる（それが縮尺の誤差として残る）
       [p1, p2].forEach((p, i) => {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 7 * k, 0, Math.PI * 2);
-        ctx.fillStyle = i === 0 ? '#f59e0b' : '#10b981';
-        ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2 * k;
-        ctx.stroke();
+        const focused = dragMode === (i === 0 ? 'calib-p1' : 'calib-p2');
+        drawCalibPoint(ctx, p.x, p.y, i === 0 ? '#f59e0b' : '#10b981', k, focused);
       });
 
       // ラベル
@@ -958,25 +1002,14 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       const cornerNames = ['左上', '右上', '右下', '左下'];
       quad.forEach((p, i) => {
         const done = quad.length === 4 && calibration.homography;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 8 * k, 0, Math.PI * 2);
-        ctx.fillStyle = done ? '#10d97c' : '#f59e0b';
-        ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 2 * k;
-        ctx.stroke();
-        ctx.fillStyle = '#06101f';
-        ctx.font = `bold ${11 * k}px Inter, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(String(i + 1), p.x, p.y + 0.5 * k);
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'alphabetic';
+        const focused = dragMode === 'plane-corner' && dragIndex === i;
+        // 番号はリングの外側。角そのものを数字で潰さない
+        drawCalibPoint(ctx, p.x, p.y, done ? '#10d97c' : '#f59e0b', k, focused, String(i + 1));
         // 未確定のときは次にどこを押すかを示す
         if (quad.length < 4) {
           ctx.fillStyle = '#fbbf24';
           ctx.font = `${11 * k}px Inter, sans-serif`;
-          ctx.fillText(cornerNames[i], p.x + 12 * k, p.y - 10 * k);
+          ctx.fillText(cornerNames[i], p.x + 14 * k, p.y + 16 * k);
         }
       });
 
@@ -1090,7 +1123,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     historyData, objects, selectedObjId, showTrail,
     dragMode, dragStart, dragCurrent, isSquareMode, calibration,
     correctMode, isPlaying, manualObjId, nearestFrameIndex, grabPoint,
-    originMode, manualMode, frameTolerance,
+    originMode, manualMode, frameTolerance, issueTimes,
   ]);
 
   renderRef.current = renderFrame;
@@ -2003,6 +2036,41 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
                 onClick={() => onChangeTimeRange({ ...timeRange, start: roiStartTime })}
                 title="枠を引いたコマを区間の始点にそろえます">
                 枠のコマを始点にする
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* コマの点検結果。数値が合わないとき、原因がここにあることが多い */}
+        {(trackQuality.issues.length > 0 || trackQuality.blurLimitTime !== null) && (
+          <div style={{
+            flexBasis: '100%', display: 'flex', alignItems: 'center', gap: 8,
+            flexWrap: 'wrap', fontSize: '0.72rem', color: '#fcd34d', lineHeight: 1.5,
+          }}>
+            <span style={{ flex: 1, minWidth: 200 }}>
+              {trackQuality.issues.length > 0 && (
+                <>
+                  ⚠ 位置の飛んでいるコマが {trackQuality.issues.length} 個あります
+                  （{trackQuality.issues.slice(0, 4).map(v => v.timestamp.toFixed(3)).join(' / ')}
+                  {trackQuality.issues.length > 4 ? ' …' : ''} s・映像では橙の破線で囲んでいます）。
+                  動画側のコマの時刻ずれか、追跡の失敗です。速度と加速度はこの前後で必ず暴れます。{' '}
+                </>
+              )}
+              {trackQuality.blurLimitTime !== null && (
+                <>
+                  ⚠ {trackQuality.blurLimitTime.toFixed(3)} s から、1 コマの移動量が枠の大きさに
+                  近づきます。対象が自分の大きさ以上に流れて写るので、ここから先の点は
+                  中心からずれます。
+                </>
+              )}
+            </span>
+            {trackQuality.blurLimitTime !== null && (
+              <button
+                className="btn btn-warning btn-sm"
+                onClick={() => onChangeTimeRange({ ...timeRange, end: trackQuality.blurLimitTime })}
+                title="ブレが大きくなる手前を区間の終点にします"
+              >
+                ここを終点にする
               </button>
             )}
           </div>

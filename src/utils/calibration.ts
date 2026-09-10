@@ -57,6 +57,76 @@ export const recalcScale = (
 };
 
 /**
+ * 校正の基準が、画面上で何ピクセルあるか。
+ *
+ *   line  : 2点間の距離
+ *   plane : 四辺のうちいちばん短いもの
+ *   box   : 枠の幅（pxPerUnit × 実寸で復元する）
+ *
+ * 求められないときは 0。
+ */
+export const referenceLengthPx = (calib: ScaleCalibration): number => {
+  if (calib.mode === 'line') {
+    return calib.linePoints.length === 2
+      ? pixelDistance(calib.linePoints[0], calib.linePoints[1])
+      : 0;
+  }
+  if (calib.mode === 'plane') {
+    const q = calib.planePoints;
+    if (q.length !== 4) return 0;
+    let mn = Infinity;
+    for (let i = 0; i < 4; i++) mn = Math.min(mn, pixelDistance(q[i], q[(i + 1) % 4]));
+    return isFinite(mn) ? mn : 0;
+  }
+  return calib.pxPerUnit > 0 && calib.realSizeValue > 0
+    ? calib.pxPerUnit * calib.realSizeValue
+    : 0;
+};
+
+/**
+ * 基準の端を 1px 取り違えたときに乗る相対誤差 [%]。
+ *
+ * 縮尺は「実寸 ÷ 基準のピクセル長」なので、誤差は基準の長さに反比例する。
+ * そしてこの誤差は長さ・速度・加速度へ**そのままの倍率で**効く。
+ * 直径 33px の球を基準にすると 3%/px。両端を 4px ずつ外に取っただけで
+ * 24% ずれ、重力加速度は 9.8 ではなく 7.9 になる。実際に起きた話である。
+ */
+export const pxSensitivityPct = (calib: ScaleCalibration): number => {
+  const L = referenceLengthPx(calib);
+  return L > 0 ? 100 / L : 0;
+};
+
+/** 基準の長さの評価。poor は「測定として成立しにくい」の意味 */
+export type CalibGrade = 'none' | 'poor' | 'fair' | 'good';
+
+/** 短い基準ほど危ない。しきい値は 1px の狂いが 2% / 0.7% になる長さ */
+export const calibrationGrade = (calib: ScaleCalibration): CalibGrade => {
+  const L = referenceLengthPx(calib);
+  if (!(L > 0)) return 'none';
+  if (L < 50) return 'poor';
+  if (L < 150) return 'fair';
+  return 'good';
+};
+
+/**
+ * 校正の危うさを一文で伝える。十分に長い基準なら null（黙る）。
+ *
+ * 誤差が黙って通り過ぎるのがいちばんまずい、という判断でこれを出している。
+ * 数値が合わないとき、人はまず fps や追跡を疑うが、実際には校正の
+ * クリック 2 回であることが多い。
+ */
+export const calibrationAdvice = (calib: ScaleCalibration): string | null => {
+  const L = referenceLengthPx(calib);
+  if (!(L > 0) || L >= 150) return null;
+  const pct = 100 / L;
+  const tail = L < 50
+    ? '定規のように 150px 以上に写るものを基準にしてください。'
+    : 'もう少し長いものを基準にすると安定します。';
+  return `基準が ${L.toFixed(0)}px しかありません。端を 1px ずらすと ${pct.toFixed(1)}% ずれ、`
+    + `速度も加速度も同じ割合でずれます。${tail}`;
+};
+
+/**
  * 出力を m にそろえるための係数。
  *
  * 基準の長さは cm や mm で入力してもらうほうが自然（A4 なら 29.7cm）だが、

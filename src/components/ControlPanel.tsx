@@ -21,6 +21,7 @@ import {
 import {
   recalcScale, convertValue, pixelDistance, fmt,
   isCalibrated as calibDone, scaleVariation,
+  calibrationAdvice, calibrationGrade, referenceLengthPx,
 } from '../utils/calibration';
 import { RECOMMENDED_ROI_SIZE } from '../utils/tracker';
 import {
@@ -110,6 +111,10 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
     ? pixelDistance(calibration.linePoints[0], calibration.linePoints[1])
     : 0;
   const isCalibrated = calibDone(calibration);
+  // 基準の短さは、そのまま長さ・速度・加速度の誤差になる。
+  // 黙って通り過ぎるといちばん気づけない種類の誤差なので、ここで必ず出す。
+  const scaleAdvice = calibrationAdvice(calibration);
+  const scaleGrade = calibrationGrade(calibration);
   const hasPlane = calibration.mode === 'plane' && calibration.homography !== null;
   const variation = scaleVariation(calibration, videoWidth, videoHeight);
 
@@ -626,6 +631,22 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             </>
           )}
         </div>
+
+        {/* 基準の短さの警告 */}
+        {scaleAdvice && (
+          <div style={{
+            marginTop: '8px', fontSize: '0.76rem', lineHeight: 1.6,
+            background: scaleGrade === 'poor' ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
+            border: `1px solid ${scaleGrade === 'poor' ? 'rgba(239,68,68,0.4)' : 'rgba(245,158,11,0.35)'}`,
+            color: scaleGrade === 'poor' ? '#fca5a5' : '#fcd34d',
+            padding: '9px 11px', borderRadius: '8px',
+          }}>
+            ⚠ {scaleAdvice}
+            <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>
+              いまの基準: <span className="mono">{referenceLengthPx(calibration).toFixed(1)} px</span>
+            </div>
+          </div>
+        )}
 
         {/* 座標系 */}
         <label style={{
