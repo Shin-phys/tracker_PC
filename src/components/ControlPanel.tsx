@@ -648,6 +648,18 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
           </div>
         )}
 
+        {/* 微調整の操作 */}
+        {isCalibrated && calibration.mode !== 'box' && (
+          <div style={{
+            marginTop: '8px', fontSize: '0.74rem', lineHeight: 1.6,
+            color: 'var(--text-muted)',
+          }}>
+            映像上の校正点をクリックして選ぶと、<b>矢印キーで 1px</b>、
+            <b>Shift+矢印で 10px</b> 動かせます（Tab で次の点へ、Esc で選択解除）。
+            選んでいる点は太く描かれます。
+          </div>
+        )}
+
         {/* 座標系 */}
         <label style={{
           display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px',

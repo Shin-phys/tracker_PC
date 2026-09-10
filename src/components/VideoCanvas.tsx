@@ -143,6 +143,12 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const [dragCurrent, setDragCurrent] = useState<Point | null>(null);
   /** plane 校正でドラッグ中の頂点 index、手動修正中のオブジェクトID */
   const [dragIndex, setDragIndex] = useState(-1);
+  /**
+   * 矢印キーで動かす校正点。null なら誰も選んでいない。
+   * 「どの点が動くのか」が見えないままキーで動かすと、直したつもりで
+   * 反対の点を動かしていることがある。選択中の点は映像上で太く描く。
+   */
+  const [calibFocus, setCalibFocus] = useState<number | null>(null);
   const [manualObjId, setManualObjId] = useState<string | null>(null);
   /**
    * いま表示されているフレームの実時刻（mediaTime）。
@@ -499,6 +505,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           if (pixelDistance(pt, quad[i]) <= HANDLE_RADIUS) {
             setDragMode('plane-corner');
             setDragIndex(i);
+            setCalibFocus(i);
             setDragCurrent(pt);
             return;
           }
@@ -522,11 +529,13 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     if (calibration.mode === 'line' && pts.length === 2 && !isLineCalibrating) {
       if (pixelDistance(pt, pts[0]) <= HANDLE_RADIUS) {
         setDragMode('calib-p1');
+        setCalibFocus(0);
         setDragCurrent(pt);
         return;
       }
       if (pixelDistance(pt, pts[1]) <= HANDLE_RADIUS) {
         setDragMode('calib-p2');
+        setCalibFocus(1);
         setDragCurrent(pt);
         return;
       }
@@ -567,6 +576,8 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     }
 
     // ---------- 通常ドラッグ（ROI指定） ----------
+    // 別の層を触り始めたので、校正の選択は外して表示を元へ戻す
+    setCalibFocus(null);
     setDragMode('roi');
     setDragStart(pt);
     setDragCurrent(pt);
@@ -657,25 +668,50 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         setDragMode(null);
         return;
       }
-      if (calibration.mode !== 'line' || calibration.linePoints.length !== 2) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+      const lineReady = calibration.mode === 'line' && calibration.linePoints.length === 2;
+      const planeReady = calibration.mode === 'plane' && calibration.planePoints.length === 4;
+      if (!lineReady && !planeReady) return;
+      const count = lineReady ? 2 : 4;
+
+      // Tab で動かす点を切り替える（選んでいる点は映像上で太く描かれる）
+      if (e.key === 'Tab' && calibFocus !== null) {
+        e.preventDefault();
+        setCalibFocus((calibFocus + 1) % count);
+        return;
+      }
+      if (e.key === 'Escape') { setCalibFocus(null); return; }
+
       const map: Record<string, [number, number]> = {
         ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
       };
       const d = map[e.key];
       if (!d) return;
       e.preventDefault();
-      // Shift で 2点目、それ以外は1点目を動かす
-      const idx = e.shiftKey ? 1 : 0;
-      const pts = calibration.linePoints.map((p, i) =>
-        i === idx ? { x: p.x + d[0], y: p.y + d[1] } : p
-      );
-      onUpdateCalibration(recalcScale({ ...calibration, linePoints: pts }));
+
+      // 矢印で 1px、Shift を足して 10px。
+      // 以前は Shift が「2点目を動かす」だったが、それだと動く点が
+      // 画面に出ていないので取り違える。動かす点はクリックか Tab で選ぶ。
+      const step = e.shiftKey ? 10 : 1;
+      const idx = calibFocus ?? 0;
+      setCalibFocus(idx);
+      const move = (p: Point, i: number) =>
+        (i === idx ? { x: p.x + d[0] * step, y: p.y + d[1] * step } : p);
+
+      if (lineReady) {
+        onUpdateCalibration(recalcScale({
+          ...calibration, linePoints: calibration.linePoints.map(move),
+        }));
+      } else {
+        applyPlane(calibration.planePoints.map(move));
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [calibration, onUpdateCalibration, isLineCalibrating, setIsLineCalibrating, originMode]);
+  }, [calibration, onUpdateCalibration, isLineCalibrating, setIsLineCalibrating,
+      originMode, calibFocus, applyPlane]);
 
   // -------------------------------------------------
   // Canvas 描画
@@ -727,6 +763,13 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
     // 高解像度動画でも線の太さが見た目一定になるようスケール
     const k = Math.max(1, vw / 960);
+
+    // いま校正を触っているか。層の出し分けに使う。
+    // 枠・名前・校正点・校正の数値が同じ場所に重なると、どれを操作して
+    // いるのか分からなくなる。操作中の層だけを濃くするのが確実に効く。
+    const calibActive = isLineCalibrating || originMode || calibFocus !== null
+      || dragMode === 'calib-new' || dragMode === 'calib-p1'
+      || dragMode === 'calib-p2' || dragMode === 'plane-corner';
 
     // ----- 軌跡 -----
     if (showTrail && historyData.length > 1) {
@@ -840,7 +883,9 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       const boxColor = isLost ? '#ef4444' : obj.color;
 
       ctx.save();
-      if (isSelected) {
+      // 校正中は追跡の層を薄くする
+      if (calibActive) ctx.globalAlpha = 0.28;
+      if (isSelected && !calibActive) {
         ctx.shadowColor = boxColor;
         ctx.shadowBlur = 8 * k;
       }
@@ -848,19 +893,28 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       ctx.lineWidth = (isSelected ? 2.5 : 1.5) * k;
       ctx.setLineDash(isLost ? [6 * k, 4 * k] : []);
       ctx.strokeRect(x, y, width, height);
-      ctx.restore();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
 
-      // ラベル
-      const labelText = isLost ? `${obj.id} LOST` : obj.id;
-      ctx.font = `bold ${11 * k}px Inter, sans-serif`;
-      const tw = ctx.measureText(labelText).width;
-      const labelW = tw + 14 * k;
-      const labelH = 20 * k;
-      const labelY = Math.max(0, y - labelH - 3 * k);
-      ctx.fillStyle = boxColor;
-      ctx.fillRect(x, labelY, labelW, labelH);
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(labelText, x + 7 * k, labelY + 14 * k);
+      // 名前を出すのは選択中と LOST のときだけ。
+      // 帯は枠と同じ幅を占めるので、全部に出すと枠の上が名前で埋まる。
+      if (isSelected || isLost) {
+        const labelText = isLost ? `${obj.id} LOST` : obj.id;
+        ctx.font = `bold ${11 * k}px Inter, sans-serif`;
+        const tw = ctx.measureText(labelText).width;
+        const labelW = tw + 14 * k;
+        const labelH = 20 * k;
+        const labelY = Math.max(0, y - labelH - 3 * k);
+        ctx.fillStyle = boxColor;
+        ctx.fillRect(x, labelY, labelW, labelH);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(labelText, x + 7 * k, labelY + 14 * k);
+      } else {
+        // 非選択は角の小さな印だけ。色で見分けられれば足りる
+        const s = 7 * k;
+        ctx.fillStyle = boxColor;
+        ctx.fillRect(x, Math.max(0, y - s - 2 * k), s, s);
+      }
 
       // サブピクセル中心の十字
       const c = obj.center || { x: x + width / 2, y: y + height / 2 };
@@ -870,6 +924,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.2 * k;
       ctx.stroke();
+      ctx.restore();
     });
 
     // ----- ドラッグ中の ROI プレビュー -----
@@ -910,33 +965,52 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
     // ----- 校正線 -----
     const drawLine = (p1: Point, p2: Point, live: boolean) => {
+      // 校正が済んだあとは控えめにする。値は一度決まれば変わらないので、
+      // 映像の上に居座る必要がない（数値は校正パネルに常時出ている）。
+      const focus = live || calibActive;
       const dist = pixelDistance(p1, p2);
       ctx.save();
       // 影
       ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-      ctx.lineWidth = 5 * k;
+      ctx.lineWidth = (focus ? 5 : 3) * k;
       ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-      ctx.strokeStyle = live ? '#fbbf24' : '#f59e0b';
-      ctx.lineWidth = 2.5 * k;
+      ctx.strokeStyle = live ? '#fbbf24' : focus ? '#f59e0b' : 'rgba(245,158,11,0.6)';
+      ctx.lineWidth = (focus ? 2.5 : 1.4) * k;
       ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
 
       // 端点。中を塗らない。塗ると狙っている目盛りが自分の描画で隠れ、
       // 終点を目分量で置くことになる（それが縮尺の誤差として残る）
       [p1, p2].forEach((p, i) => {
-        const focused = dragMode === (i === 0 ? 'calib-p1' : 'calib-p2');
+        const focused = dragMode === (i === 0 ? 'calib-p1' : 'calib-p2')
+          || (!live && calibFocus === i);
         drawCalibPoint(ctx, p.x, p.y, i === 0 ? '#f59e0b' : '#10b981', k, focused);
       });
 
-      // ラベル
-      const midX = (p1.x + p2.x) / 2;
-      const midY = (p1.y + p2.y) / 2;
-      const label = `${dist.toFixed(1)} px = ${calibration.realSizeValue} ${calibration.unit}`;
-      ctx.font = `bold ${12 * k}px JetBrains Mono, monospace`;
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = 'rgba(0,0,0,0.8)';
-      ctx.fillRect(midX - tw / 2 - 8 * k, midY - 28 * k, tw + 16 * k, 22 * k);
-      ctx.fillStyle = '#fbbf24';
-      ctx.fillText(label, midX - tw / 2, midY - 12 * k);
+      // 数値は、製図の寸法線と同じように線から垂直へ逃がす。
+      // 基準が短いとき、線の真上に置くと狙っている対象を数値で隠してしまう。
+      if (focus) {
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+        const len = Math.max(1, dist);
+        let nx = -(p2.y - p1.y) / len;
+        let ny = (p2.x - p1.x) / len;
+        if (ny > 0) { nx = -nx; ny = -ny; }   // なるべく上へ逃がす
+        const lx = midX + nx * 34 * k;
+        const ly = midY + ny * 34 * k;
+        ctx.beginPath();
+        ctx.moveTo(midX, midY); ctx.lineTo(lx, ly);
+        ctx.strokeStyle = 'rgba(251,191,36,0.65)';
+        ctx.lineWidth = 1 * k;
+        ctx.stroke();
+
+        const label = `${dist.toFixed(1)} px = ${calibration.realSizeValue} ${calibration.unit}`;
+        ctx.font = `bold ${12 * k}px JetBrains Mono, monospace`;
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = 'rgba(0,0,0,0.8)';
+        ctx.fillRect(lx - tw / 2 - 8 * k, ly - 11 * k, tw + 16 * k, 22 * k);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillText(label, lx - tw / 2, ly + 4 * k);
+      }
       ctx.restore();
     };
 
@@ -1002,7 +1076,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       const cornerNames = ['左上', '右上', '右下', '左下'];
       quad.forEach((p, i) => {
         const done = quad.length === 4 && calibration.homography;
-        const focused = dragMode === 'plane-corner' && dragIndex === i;
+        const focused = (dragMode === 'plane-corner' && dragIndex === i) || calibFocus === i;
         // 番号はリングの外側。角そのものを数字で潰さない
         drawCalibPoint(ctx, p.x, p.y, done ? '#10d97c' : '#f59e0b', k, focused, String(i + 1));
         // 未確定のときは次にどこを押すかを示す
@@ -1123,7 +1197,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     historyData, objects, selectedObjId, showTrail,
     dragMode, dragStart, dragCurrent, isSquareMode, calibration,
     correctMode, isPlaying, manualObjId, nearestFrameIndex, grabPoint,
-    originMode, manualMode, frameTolerance, issueTimes,
+    originMode, manualMode, frameTolerance, issueTimes, isLineCalibrating, calibFocus,
   ]);
 
   renderRef.current = renderFrame;
