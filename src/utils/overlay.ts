@@ -87,12 +87,15 @@ export function drawCalibPoint(
   focused = false,
   badge?: string
 ): void {
-  const arm = focused ? 15 : 12;
+  // 大きさは元の丸（半径 7px）と同じ差し渡しに収める。
+  // 印は位置を示すためのもので、大きくしても精度は上がらない。
+  // むしろ腕が長いほど、その下にある目盛りや縁が隠れる面積が増える。
+  const arm = focused ? 9 : 7;
 
   ctx.save();
   // 半透明。狙っている目盛りや球の縁を、印の下から透かして見せる
   ctx.globalAlpha = focused ? 0.95 : 0.7;
-  drawCrosshair(ctx, x, y, color, k, arm, 2.6, focused ? 1.8 : 1.3);
+  drawCrosshair(ctx, x, y, color, k, arm, 2.2, focused ? 1.7 : 1.3);
   ctx.restore();
 
   if (badge) {
@@ -103,9 +106,9 @@ export function drawCalibPoint(
     ctx.lineWidth = 2.6 * k;
     ctx.strokeStyle = 'rgba(0,0,0,0.65)';
     ctx.lineJoin = 'round';
-    ctx.strokeText(badge, x + 4.5 * k, y - 4.5 * k);
+    ctx.strokeText(badge, x + 4 * k, y - 4 * k);
     ctx.fillStyle = color;
-    ctx.fillText(badge, x + 4.5 * k, y - 4.5 * k);
+    ctx.fillText(badge, x + 4 * k, y - 4 * k);
     ctx.restore();
   }
 }

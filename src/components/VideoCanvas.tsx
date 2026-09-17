@@ -974,7 +974,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       // 線で塗ってしまうと、印を細く半透明にした意味がなくなる。
       const ux = (p2.x - p1.x) / Math.max(1, dist);
       const uy = (p2.y - p1.y) / Math.max(1, dist);
-      const cut = Math.min(11 * k, dist * 0.3);
+      const cut = Math.min(8 * k, dist * 0.3);
       const a = { x: p1.x + ux * cut, y: p1.y + uy * cut };
       const b = { x: p2.x - ux * cut, y: p2.y - uy * cut };
       // 影
