@@ -65,18 +65,18 @@ export function drawCrosshair(
 }
 
 /**
- * 校正点の印。**中を塗らない**のが肝で、理由は drawCrosshair と同じ。
+ * 校正点の印。**十字だけ**。囲みも塗りも置かない。
  *
- * 塗りつぶした丸で置くと、狙っている目盛りや球の縁が自分の描画で隠れる。
- * 隠れたまま終点を決めることになるので、実際には目分量になる。
- * 校正の縮尺は「実寸 ÷ 基準のピクセル長」なので、この目分量はそのまま
+ * 狙っている画素の上に何かを重ねた時点で、そこは目分量になる。
+ * 校正の縮尺は「実寸 ÷ 基準のピクセル長」なので、その目分量はそのまま
  * 長さ・速度・加速度の誤差として残る。基準が 33px なら 1px の狂いが 3%。
  *
- * ここでは「細いリング＋四方の腕＋中心の穴」にして、中心の 1px と
- * その周囲が最後まで見えるようにしている。
+ * だから腕は細く、半透明にして下の絵を透かし、中心には穴を空ける。
+ * 濃い縁取りを内側に敷いてあるので、白い紙の上でも黒い机の上でも見える。
+ * 掴める範囲は描画とは別に持っているので、印を小さくしても操作性は落ちない。
  *
- * @param focused 選択中（矢印キーやドラッグの対象）なら太く描く
- * @param badge   点に付ける短い文字（平面校正の 1〜4）。リングの外側に置く
+ * @param focused 選択中（矢印キーやドラッグの対象）なら濃く・大きく描く
+ * @param badge   点に付ける短い文字（平面校正の 1〜4）。腕の間の空きに置く
  */
 export function drawCalibPoint(
   ctx: CanvasRenderingContext2D,
@@ -87,35 +87,25 @@ export function drawCalibPoint(
   focused = false,
   badge?: string
 ): void {
-  const r = (focused ? 9 : 7.5) * k;
+  const arm = focused ? 15 : 12;
 
   ctx.save();
-  // 暗いフチ → 本体色、の順にリングだけを引く（fill はしない）
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-  ctx.lineWidth = (focused ? 3.6 : 2.8) * k;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = (focused ? 2.2 : 1.5) * k;
-  ctx.stroke();
+  // 半透明。狙っている目盛りや球の縁を、印の下から透かして見せる
+  ctx.globalAlpha = focused ? 0.95 : 0.7;
+  drawCrosshair(ctx, x, y, color, k, arm, 2.6, focused ? 1.8 : 1.3);
   ctx.restore();
 
-  // リングの外へ伸びる腕。中心の穴は必ず空けたままにする
-  drawCrosshair(ctx, x, y, color, k, r / k + 6, 2.4, focused ? 1.9 : 1.4);
-
   if (badge) {
+    // 腕と腕の間（右上の空き）へ。囲みは付けず、縁取りだけで読ませる
     ctx.save();
     ctx.font = `bold ${11 * k}px Inter, sans-serif`;
-    const bw = ctx.measureText(badge).width;
-    const bx = x + r + 4 * k;
-    const by = y - r - 4 * k;
-    ctx.fillStyle = 'rgba(0,0,0,0.72)';
-    ctx.fillRect(bx, by - 11 * k, bw + 8 * k, 15 * k);
+    ctx.textBaseline = 'bottom';
+    ctx.lineWidth = 2.6 * k;
+    ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+    ctx.lineJoin = 'round';
+    ctx.strokeText(badge, x + 4.5 * k, y - 4.5 * k);
     ctx.fillStyle = color;
-    ctx.fillText(badge, bx + 4 * k, by + 0.5 * k);
+    ctx.fillText(badge, x + 4.5 * k, y - 4.5 * k);
     ctx.restore();
   }
 }

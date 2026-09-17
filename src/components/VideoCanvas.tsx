@@ -970,13 +970,21 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       const focus = live || calibActive;
       const dist = pixelDistance(p1, p2);
       ctx.save();
+      // 端の近くでは線を切る。そこは狙っている画素そのものなので、
+      // 線で塗ってしまうと、印を細く半透明にした意味がなくなる。
+      const ux = (p2.x - p1.x) / Math.max(1, dist);
+      const uy = (p2.y - p1.y) / Math.max(1, dist);
+      const cut = Math.min(11 * k, dist * 0.3);
+      const a = { x: p1.x + ux * cut, y: p1.y + uy * cut };
+      const b = { x: p2.x - ux * cut, y: p2.y - uy * cut };
       // 影
-      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-      ctx.lineWidth = (focus ? 5 : 3) * k;
-      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-      ctx.strokeStyle = live ? '#fbbf24' : focus ? '#f59e0b' : 'rgba(245,158,11,0.6)';
-      ctx.lineWidth = (focus ? 2.5 : 1.4) * k;
-      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+      ctx.lineWidth = (focus ? 4 : 2.6) * k;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.strokeStyle = live ? 'rgba(251,191,36,0.85)'
+        : focus ? 'rgba(245,158,11,0.8)' : 'rgba(245,158,11,0.5)';
+      ctx.lineWidth = (focus ? 2 : 1.2) * k;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
 
       // 端点。中を塗らない。塗ると狙っている目盛りが自分の描画で隠れ、
       // 終点を目分量で置くことになる（それが縮尺の誤差として残る）
