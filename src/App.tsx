@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   TrackedObject, ScaleCalibration, FilterSettings,
   FrameData, Rect, FpsSettings, TrackingSettings,
-  DEFAULT_TRACKING, ObjectStatus, Point,
+  DEFAULT_TRACKING, ObjectStatus, Point, SeedHint,
 } from './types';
 import { waitForOpenCV } from './utils/opencvLoader';
 import { ObjectTracker, MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE } from './utils/tracker';
@@ -15,7 +15,7 @@ import {
   countManualPoints,
 } from './utils/manualTrack';
 import {
-  TimeRange, FULL_RANGE, inRange, normalizeRange, trackedPointAt,
+  TimeRange, FULL_RANGE, inRange, normalizeRange, trackedPointAt, trackedStepAt,
 } from './utils/timeRange';
 
 import { Header } from './components/Header';
@@ -46,6 +46,7 @@ const makeDefaultObjects = (): TrackedObject[] =>
     center: null,
     initialRoi: null,
     initialTime: null,
+    seed: null,
   }));
 
 /** 記録データを React state に反映する最小間隔 (ms)。
@@ -214,7 +215,7 @@ export const App: React.FC = () => {
         o.id === inactive.id
           ? {
               ...o, active: true, status: 'idle' as ObjectStatus,
-              roi: null, center: null, initialRoi: null, initialTime: null,
+              roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
             }
           : o
       )
@@ -233,7 +234,7 @@ export const App: React.FC = () => {
         o.id === id
           ? {
               ...o, active: false, status: 'idle' as ObjectStatus,
-              roi: null, center: null, initialRoi: null, initialTime: null,
+              roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
             }
           : o
       )
@@ -301,6 +302,8 @@ export const App: React.FC = () => {
                 // 「やり直し」はここへ戻す（roi は追跡中に上書きされるため）。
                 initialRoi: roi,
                 initialTime: videoEl ? videoEl.currentTime : null,
+                // 枠を置き直したら、前の初速ヒントは別の位置を指しているので捨てる
+                seed: null,
               }
             : o
         )
@@ -394,6 +397,65 @@ export const App: React.FC = () => {
     flushHistory(true);
     return ok;
   }, [flushHistory, frameTolerance]);
+
+  // -------------------------------------------------
+  // 初速ヒント
+  // -------------------------------------------------
+
+  /**
+   * 枠を置いたコマから数コマ送って、同じ対象をもう一度指してもらう。
+   * その 2 点から「1 コマあたりの移動量」を出し、等速度予測の初期値にする。
+   *
+   * トラッカーは最初の 1 コマだけ速度を持たない。そのコマは予測なしで
+   * 前の位置を中心に探すので、1 コマの移動量が探索窓を超える対象は
+   * そこで必ず破綻する。投げた直後や衝突直後の球がこれに当たる。
+   *
+   * 戻り値は画面に出す一言。**基本は空文字（何も言わない）**。
+   * 1 コマあたりの移動量のような数字は、こちらが使うためのもので、
+   * 読んで判断してもらう類の値ではない。走らせても全部壊れる場合だけ、
+   * 走らせる前に止める。
+   */
+  const handleSeedPoint = useCallback(
+    (objId: string, point: Point, fileTime: number): string => {
+      const obj = objectsRef.current.find(o => o.id === objId);
+      if (!obj || !obj.initialRoi || obj.initialTime === null) {
+        return '先に枠を置いてください';
+      }
+      const fps = Math.max(1, fpsSettings.value);
+      const frames = Math.round((fileTime - obj.initialTime) * fps);
+      if (frames < 1) return 'コマを送ってから指してください';
+
+      // 起点は「枠を置いた位置」。center は追跡中に上書きされるので、
+      // 一度走らせたあとに初速を教えると、最後に到達した位置から測って
+      // しまう。数 px の精度差より、こちらのほうがはるかに重い。
+      const from = {
+        x: obj.initialRoi.x + obj.initialRoi.width / 2,
+        y: obj.initialRoi.y + obj.initialRoi.height / 2,
+      };
+      const perFrame = {
+        x: (point.x - from.x) / frames,
+        y: (point.y - from.y) / frames,
+      };
+      setObjects(prev => prev.map(o =>
+        o.id === objId ? { ...o, seed: { point, time: fileTime, perFrame } } : o
+      ));
+      // 枠を置いた時点で作られたトラッカーが既にいるので、そこへも渡す
+      const t = trackersRef.current[objId];
+      if (t) t.setSeedVelocity(perFrame);
+
+      // 1 コマの移動量が対象の大きさを超えていたら、追跡は成立しない。
+      // 対象は自分の直径以上に流れて写り、照合の中心は対象の中心ではなくなる。
+      // ここだけは走らせる前に止める（全コマ処理の待ち時間が無駄になるため）。
+      const step = Math.hypot(perFrame.x, perFrame.y);
+      const size = Math.min(obj.initialRoi.width, obj.initialRoi.height) * 0.8;
+      if (step > size) {
+        return `1 コマで ${step.toFixed(0)}px 動いています。対象より大きいので、`
+          + `このままでは追えません。撮影 fps を上げるか、対象を大きく写してください。`;
+      }
+      return '';
+    },
+    [fpsSettings.value]
+  );
 
   // -------------------------------------------------
   // 手動修正（キーフレーム編集）
@@ -546,7 +608,7 @@ export const App: React.FC = () => {
     setObjects(prev =>
       prev.map(o => ({
         ...o, status: 'idle' as ObjectStatus,
-        roi: null, center: null, initialRoi: null, initialTime: null,
+        roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
       }))
     );
   }, []);
@@ -589,10 +651,17 @@ export const App: React.FC = () => {
     const before = historyDataRef.current;
     const tol = frameTolerance() * 3;   // 1.5 コマ分
     const backTo = new Map<string, Point | null>();
+    // 戻る先での速度も拾っておく。速い対象では、速度を捨てて再開すると
+    // 最初の 1 コマで予測が効かず、そこで破綻する。
+    const seedAt = new Map<string, SeedHint | null>();
     objectsRef.current.forEach(o => {
       backTo.set(
         o.id,
         restartAt != null ? trackedPointAt(before, o.id, restartAt, tol) : null
+      );
+      seedAt.set(
+        o.id,
+        restartAt != null ? trackedStepAt(before, o.id, restartAt, tol) : null
       );
     });
 
@@ -623,7 +692,7 @@ export const App: React.FC = () => {
         roi,
         center: null,
         ...(p && restartAt != null
-          ? { initialRoi: roi, initialTime: restartAt }
+          ? { initialRoi: roi, initialTime: restartAt, seed: seedAt.get(o.id) ?? null }
           : {}),
       };
     }));
@@ -656,6 +725,8 @@ export const App: React.FC = () => {
         if (prevFrame && timestamp <= prevFrame.timestamp) return;
         const currentCalibration = calibrationRef.current;
         const activeObjs = objectsRef.current.filter(o => o.active);
+        // 初速ヒントのコマと同じコマかを判定する許容差
+        const seedTol = frameTolerance();
 
         const frameObjects: FrameData['objects'] = {};
         const updates: {
@@ -672,6 +743,8 @@ export const App: React.FC = () => {
             if (!tracker) {
               tracker = new ObjectTracker(cv, obj.id, cfg);
               if (!tracker.init(src, obj.roi)) return;
+              // やり直しのあとはここで作り直されるので、初速ヒントを渡し直す
+              if (obj.seed) tracker.setSeedVelocity(obj.seed.perFrame);
               trackersRef.current[obj.id] = tracker;
             }
 
@@ -680,6 +753,23 @@ export const App: React.FC = () => {
             if (res.state === 'exited') {
               updates.push({ id: obj.id, status: 'exited' });
               return; // このフレームの記録には含めない
+            }
+
+            // 初速ヒントを指したコマに来たら、そこに居るかを確かめる。
+            // 人が「ここに居る」と言った場所と食い違うなら、テンプレートは
+            // 別のものに一致している。マッチングスコアは高いままなので、
+            // これが「間違って追っている」と分かる唯一の手がかりになる。
+            if (obj.seed && Math.abs(timestamp - obj.seed.time) <= seedTol) {
+              const gap = Math.hypot(
+                res.center.x - obj.seed.point.x,
+                res.center.y - obj.seed.point.y
+              );
+              if (gap > Math.max(12, obj.roi.width * 0.5)) {
+                setNotice(
+                  `${obj.id}: 指した位置から ${Math.round(gap)}px 離れたものを追っています。`
+                  + `別のものを掴んでいる可能性が高いので、枠を取り直してください。`
+                );
+              }
             }
 
             // 画素座標 → 実寸座標。plane モードなら射影変換で遠近を補正する
@@ -768,7 +858,7 @@ export const App: React.FC = () => {
         console.error('[App] フレーム処理エラー:', err);
       }
     },
-    [cvReady, getFrameSource, flushHistory]
+    [cvReady, getFrameSource, flushHistory, frameTolerance]
   );
 
   // -------------------------------------------------
@@ -814,6 +904,7 @@ export const App: React.FC = () => {
             onManualCorrect={handleManualCorrect}
             onManualPlace={handleManualPlace}
             onManualUndo={handleManualUndo}
+        onSeedPoint={handleSeedPoint}
             calibration={calibration}
             onUpdateCalibration={setCalibration}
             onProcessFrame={handleProcessFrame}

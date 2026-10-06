@@ -40,6 +40,7 @@ import {
 import { timeScale } from '../utils/timeScale';
 import { drawCrosshair, drawCalibPoint } from '../utils/overlay';
 import { checkTrack } from '../utils/frameCheck';
+import { SEED_FRAMES } from '../types';
 import {
   TimeRange, FULL_RANGE, hasRange, rangeStart, rangeEnd, rangeSpan,
   countInRange, MIN_RANGE_POINTS,
@@ -49,6 +50,7 @@ import {
   Play, Pause, RotateCcw, Upload, Crosshair, ZoomIn, ZoomOut,
   Eraser, ChevronLeft, ChevronRight, Gauge, Hand, MousePointerClick, Undo2,
   Scissors, CornerDownLeft, CornerDownRight, XCircle, ListVideo, Square as StopIcon,
+  Zap,
 } from 'lucide-react';
 
 interface VideoCanvasProps {
@@ -62,6 +64,8 @@ interface VideoCanvasProps {
   onManualPlace: (id: string, center: Point, fileTime: number) => boolean;
   /** 手動トラッキングの直前の 1 点を取り消す */
   onManualUndo: () => boolean;
+  /** 初速ヒント。数コマ先で対象を指す。戻り値は画面に出す一言（空なら何も言わない） */
+  onSeedPoint: (objId: string, point: Point, fileTime: number) => string;
   calibration: ScaleCalibration;
   onUpdateCalibration: (calib: ScaleCalibration) => void;
   onProcessFrame: (videoEl: HTMLVideoElement, timestamp: number, frameIndex: number) => void;
@@ -118,6 +122,7 @@ const PLAYBACK_RATES: { v: number; label: string }[] = [
 export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   objects, selectedObjId, onUpdateRoi, onManualCorrect, onManualPlace, onManualUndo,
   calibration, onUpdateCalibration, onProcessFrame,
+  onSeedPoint,
   historyData, onResetData, onClearTrail, onFlushHistory, isPlaying, setIsPlaying,
   fpsSettings, setFpsSettings,
   isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest,
@@ -171,6 +176,10 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   timeRangeRef.current = timeRange;
   /** 原点指定モード（ON のあいだ、クリックした点が座標の原点になる） */
   const [originMode, setOriginMode] = useState(false);
+  /** 初速ヒントの指定モード（ON のあいだ、クリックした点が「数コマ先の対象」） */
+  const [seedMode, setSeedMode] = useState(false);
+  /** 初速ヒントの結果の一言。普段は null（黙っている） */
+  const [seedMsg, setSeedMsg] = useState<string | null>(null);
 
   // ---- 手動トラッキング ----
   /** ON のあいだ、クリックした位置が「その物体のその時刻の位置」になる */
@@ -407,6 +416,36 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
   useEffect(() => { if (!correctMode) setCorrectMsg(null); }, [correctMode]);
 
+  /** 初速ヒントの一言も、少し経ったら消す（警告は長めに出す） */
+  useEffect(() => {
+    if (!seedMsg) return;
+    const id = window.setTimeout(() => setSeedMsg(null), 7000);
+    return () => window.clearTimeout(id);
+  }, [seedMsg]);
+
+  /**
+   * 初速ヒントの開始。枠を置いたコマから数コマ送って、同じ対象を指してもらう。
+   * ここで送るのは、2 点が近すぎると 1 コマあたりの移動量の精度が出ないため。
+   */
+  const startSeed = useCallback(async () => {
+    const v = videoRef.current;
+    const o = objects.find(x => x.id === selectedObjId);
+    if (!v || !o || o.initialTime === null) return;
+    v.pause();
+    setIsPlaying(false);
+    setOriginMode(false);
+    setCorrectMode(false);
+    setManualMode(false);
+    setIsLineCalibrating(false);
+    const target = o.initialTime + SEED_FRAMES / Math.max(1, fpsSettings.value);
+    try {
+      const t = await seekToFrameTime(v, target);
+      frameTimeRef.current = t;
+      setCurrentTime(t);
+    } catch (_) { /* シークに失敗してもモードには入る */ }
+    setSeedMode(true);
+  }, [objects, selectedObjId, fpsSettings.value, setIsPlaying, setIsLineCalibrating]);
+
   // -------------------------------------------------
   // 手動トラッキング
   // -------------------------------------------------
@@ -476,6 +515,15 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!videoLoaded) return;
     const pt = getCanvasCoordinates(e);
+
+    // ---------- 初速ヒント ----------
+    // 1 クリックで確定して自分で抜ける。
+    if (seedMode) {
+      const msg = onSeedPoint(selectedObjId, pt, frameTimeRef.current);
+      setSeedMsg(msg || null);
+      setSeedMode(false);
+      return;
+    }
 
     // ---------- 手動トラッキング ----------
     // 原点指定の次に見る。1 クリックで 1 点打ち、そのコマの物体を打ち切ったら
@@ -659,6 +707,10 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   // 校正線の矢印キーによる微調整
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && seedMode) {
+        setSeedMode(false);
+        return;
+      }
       if (e.key === 'Escape' && originMode) {
         setOriginMode(false);
         return;
@@ -711,7 +763,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [calibration, onUpdateCalibration, isLineCalibrating, setIsLineCalibrating,
-      originMode, calibFocus, applyPlane]);
+      originMode, seedMode, calibFocus, applyPlane]);
 
   // -------------------------------------------------
   // Canvas 描画
@@ -924,6 +976,31 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.2 * k;
       ctx.stroke();
+      ctx.restore();
+    });
+
+    // ----- 初速ヒント -----
+    // 指した点と枠を置いた位置を結んでおく。これが「1 コマあたりどれだけ
+    // 動くか」の根拠なので、見えていないと置き直しの判断ができない。
+    objects.forEach(obj => {
+      if (!obj.active || !obj.seed || obj.id !== selectedObjId) return;
+      ctx.save();
+      ctx.globalAlpha = 0.75;
+      if (obj.initialRoi) {
+        const from = {
+          x: obj.initialRoi.x + obj.initialRoi.width / 2,
+          y: obj.initialRoi.y + obj.initialRoi.height / 2,
+        };
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(obj.seed.point.x, obj.seed.point.y);
+        ctx.strokeStyle = obj.color;
+        ctx.lineWidth = 1.2 * k;
+        ctx.setLineDash([5 * k, 4 * k]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      drawCrosshair(ctx, obj.seed.point.x, obj.seed.point.y, obj.color, k, 9, 2.4, 1.3);
       ctx.restore();
     });
 
@@ -1577,7 +1654,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   // -------------------------------------------------
 
   const cursorStyle =
-    originMode || (manualMode && !isPlaying) ? 'crosshair'
+    originMode || seedMode || (manualMode && !isPlaying) ? 'crosshair'
       : isLineCalibrating || dragMode === 'calib-new' ? 'crosshair'
       : dragMode === 'calib-p1' || dragMode === 'calib-p2' || dragMode === 'plane-corner' ? 'grabbing'
         : dragMode === 'manual' ? 'grabbing'
@@ -1722,6 +1799,28 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           </div>
         )}
 
+        {seedMode && (
+          <div style={{
+            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(245,158,11,0.95)', color: '#000', padding: '7px 16px',
+            borderRadius: 20, fontSize: '0.82rem', fontWeight: 700, pointerEvents: 'none',
+            whiteSpace: 'nowrap', boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
+          }}>
+            ⚡ {selectedObjId} が移動した先をクリック（ESCで中止）
+          </div>
+        )}
+
+        {seedMsg && !seedMode && (
+          <div style={{
+            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(239,68,68,0.95)', color: '#fff', padding: '7px 16px',
+            borderRadius: 20, fontSize: '0.8rem', fontWeight: 700, pointerEvents: 'none',
+            maxWidth: '80%', lineHeight: 1.5, boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
+          }}>
+            ⚠ {seedMsg}
+          </div>
+        )}
+
         {originMode && (
           <div style={{
             position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
@@ -1806,6 +1905,15 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             title="コマごとに対象をクリックして手で記録します（自動追跡が効かない対象向け）">
             <MousePointerClick size={14} />
             手動記録
+          </button>
+
+          <button
+            className={`btn btn-sm ${seedMode ? 'btn-warning' : 'btn-secondary'}`}
+            onClick={() => { if (seedMode) setSeedMode(false); else void startSeed(); }}
+            disabled={!videoLoaded || !objects.find(o => o.id === selectedObjId)?.initialRoi}
+            title="速い対象向け。枠を置いたコマから数コマ送って同じ対象を指すと、追跡の最初から予測が効きます">
+            <Zap size={14} />
+            初速
           </button>
 
           <button

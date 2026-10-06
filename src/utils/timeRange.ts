@@ -179,6 +179,38 @@ export function trackedPointAt(
   return { x: it.xPx, y: it.yPx };
 }
 
+/**
+ * その時刻の「1 コマあたりの移動量」を、記録済みの軌跡から取り出す。
+ *
+ * やり直しのあと、追跡を同じ速度で再開させるために使う（初速ヒントの作り直し）。
+ * 戻る先のコマで物体が速く動いていた場合、速度の情報を捨てて再開すると、
+ * 最初の 1 コマで予測が効かず、そこで破綻する。
+ *
+ * 記録が取れているのは連続したコマなので、隣り合う 2 点の差をそのまま
+ * 1 コマあたりの移動量として扱う。
+ */
+export function trackedStepAt(
+  data: FrameData[], objId: string, t: number, tol: number
+): { point: Point; time: number; perFrame: Point } | null {
+  let best = -1;
+  let bestD = Infinity;
+  for (let i = 0; i < data.length - 1; i++) {
+    const a = data[i].objects[objId];
+    const b = data[i + 1].objects[objId];
+    if (!a || !b || a.lost || b.lost) continue;
+    const d = Math.abs(data[i].timestamp - t);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  if (best < 0 || bestD > tol) return null;
+  const a = data[best].objects[objId];
+  const b = data[best + 1].objects[objId];
+  return {
+    point: { x: b.xPx, y: b.yPx },
+    time: data[best + 1].timestamp,
+    perFrame: { x: b.xPx - a.xPx, y: b.yPx - a.yPx },
+  };
+}
+
 /** 表示用の秒数（小数 3 桁） */
 export function fmtTime(t: number): string {
   return t.toFixed(3);

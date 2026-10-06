@@ -159,6 +159,22 @@ export class ObjectTracker {
   // 1フレーム更新
   // ----------------------------------------------------------
 
+  /**
+   * 初速のヒントを与える。
+   *
+   * 等速度予測は「前のコマからの変位」を使うので、最初の 1 コマだけは
+   * 予測なしで前の位置を中心に探すしかない。1 コマの移動量が探索窓を
+   * 超える対象は、そこで必ず破綻する。数コマ先の位置を人が指してくれれば、
+   * その 1 コマ目から予測が効く。
+   *
+   * @param v 1 コマあたりの移動量 [px]
+   */
+  public setSeedVelocity(v: Point): void {
+    this.vx = v.x;
+    this.vy = v.y;
+    this.hasVelocity = true;
+  }
+
   public update(src: FrameSource): TrackerResult {
     if (this.state === 'exited') return this.result('exited', 0);
     if (!this.templateMat) return this.result('lost', 0);
