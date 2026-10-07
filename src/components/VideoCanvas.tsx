@@ -103,7 +103,8 @@ type DragMode =
   | 'roi'
   | 'calib-new' | 'calib-p1' | 'calib-p2'
   | 'plane-corner'
-  | 'manual';
+  | 'manual'
+  | 'seed';
 
 /**
  * 再生速度。0.0625 (=1/16) は **Chrome が受け付ける下限**で、
@@ -517,11 +518,12 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     const pt = getCanvasCoordinates(e);
 
     // ---------- 初速ヒント ----------
-    // 1 クリックで確定して自分で抜ける。
+    // 始点は枠の中心で決まっているので、押した瞬間に矢印が生えて、
+    // 動かすと先端が追従する。離した位置が「数コマ先の対象の位置」。
     if (seedMode) {
-      const msg = onSeedPoint(selectedObjId, pt, frameTimeRef.current);
-      setSeedMsg(msg || null);
-      setSeedMode(false);
+      setDragMode('seed');
+      setDragStart(pt);
+      setDragCurrent(pt);
       return;
     }
 
@@ -648,6 +650,20 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
   const finishDrag = useCallback(() => {
     if (!dragMode) return;
+
+    if (dragMode === 'seed') {
+      const tip = dragCurrent ?? dragStart;
+      if (tip) {
+        const msg = onSeedPoint(selectedObjId, tip, frameTimeRef.current);
+        setSeedMsg(msg || null);
+      }
+      setSeedMode(false);
+      void goToStart();
+      setDragMode(null);
+      setDragStart(null);
+      setDragCurrent(null);
+      return;
+    }
 
     if (dragMode === 'manual' && dragCurrent && manualObjId) {
       const v = videoRef.current;
@@ -978,6 +994,42 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       ctx.stroke();
       ctx.restore();
     });
+
+    // ----- 初速ヒントを引いている最中の矢印 -----
+    if (dragMode === 'seed' && dragCurrent) {
+      const o = objects.find(x => x.id === selectedObjId);
+      const from = o?.initialRoi
+        ? {
+            x: o.initialRoi.x + o.initialRoi.width / 2,
+            y: o.initialRoi.y + o.initialRoi.height / 2,
+          }
+        : null;
+      if (from) {
+        const color = o?.color || '#f59e0b';
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+        ctx.lineWidth = 5 * k;
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y); ctx.lineTo(dragCurrent.x, dragCurrent.y);
+        ctx.stroke();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5 * k;
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y); ctx.lineTo(dragCurrent.x, dragCurrent.y);
+        ctx.stroke();
+        const ang = Math.atan2(dragCurrent.y - from.y, dragCurrent.x - from.x);
+        const a = 13 * k;
+        ctx.beginPath();
+        ctx.moveTo(dragCurrent.x, dragCurrent.y);
+        ctx.lineTo(dragCurrent.x - a * Math.cos(ang - 0.42), dragCurrent.y - a * Math.sin(ang - 0.42));
+        ctx.moveTo(dragCurrent.x, dragCurrent.y);
+        ctx.lineTo(dragCurrent.x - a * Math.cos(ang + 0.42), dragCurrent.y - a * Math.sin(ang + 0.42));
+        ctx.stroke();
+        ctx.restore();
+        drawCrosshair(ctx, dragCurrent.x, dragCurrent.y, color, k, 10, 2.4, 1.4);
+      }
+    }
 
     // ----- 初速ヒント -----
     // 指した点と枠を置いた位置を結んでおく。これが「1 コマあたりどれだけ
@@ -1827,7 +1879,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             borderRadius: 20, fontSize: '0.82rem', fontWeight: 700, pointerEvents: 'none',
             whiteSpace: 'nowrap', boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
           }}>
-            ⚡ {selectedObjId} が移動した先をクリック（ESCで中止）
+            ⚡ {selectedObjId} の枠から、移動した先までドラッグ（ESCで中止）
           </div>
         )}
 
