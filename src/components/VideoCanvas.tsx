@@ -50,7 +50,7 @@ import {
   Play, Pause, RotateCcw, Upload, Crosshair, ZoomIn, ZoomOut,
   Eraser, ChevronLeft, ChevronRight, Gauge, Hand, MousePointerClick, Undo2,
   Scissors, CornerDownLeft, CornerDownRight, XCircle, ListVideo, Square as StopIcon,
-  Zap,
+  Zap, SkipBack,
 } from 'lucide-react';
 
 interface VideoCanvasProps {
@@ -1489,6 +1489,27 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const restartTime = restartTimeFor(timeRange, roiTimes);
 
   /**
+   * 記録が始まるコマへ送るだけ。軌跡は消さない。
+   * 「やり直し」と混同されやすいので、別のボタンに分けてある。
+   */
+  const goToStart = useCallback(async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.pause();
+    setIsPlaying(false);
+    try {
+      const t = await seekToFrameTime(v, restartTime);
+      frameTimeRef.current = t;
+      setCurrentTime(t);
+    } catch (_) {
+      v.currentTime = restartTime;
+      setCurrentTime(restartTime);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restartTime, setIsPlaying]);
+
+
+  /**
    * 全コマ処理 — 再生せずに 1 コマずつシークして、すべてのフレームを処理する。
    *
    * なぜ必要か
@@ -2033,7 +2054,18 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             </>
           )}
 
-          <button className="btn btn-secondary" onClick={handleReset} disabled={!videoLoaded} title="軌跡を消し、枠を最初に引いた位置へ戻して、記録が始まる時刻へ送ります">
+          {/* 記録が始まるコマへ送るだけ。軌跡は消さない */}
+          <button
+            className="btn btn-secondary" onClick={() => void goToStart()}
+            disabled={!videoLoaded}
+            title={`記録が始まる ${restartTime.toFixed(3)} s へ送ります（軌跡は消しません）`}
+          >
+            <SkipBack size={15} />
+            始点へ
+          </button>
+
+          <button className="btn btn-secondary" onClick={handleReset} disabled={!videoLoaded}
+            title={`軌跡を消し、枠を戻して ${restartTime.toFixed(3)} s へ送ります`}>
             <RotateCcw size={15} />
             やり直し
           </button>
