@@ -66,6 +66,8 @@ interface VideoCanvasProps {
   onManualUndo: () => boolean;
   /** 初速ヒント。数コマ先で対象を指す。戻り値は画面に出す一言（空なら何も言わない） */
   onSeedPoint: (objId: string, point: Point, fileTime: number) => string;
+  /** 追跡が暴れたときの一時停止要求。増えるたびに止める */
+  pauseAt: number;
   calibration: ScaleCalibration;
   onUpdateCalibration: (calib: ScaleCalibration) => void;
   onProcessFrame: (videoEl: HTMLVideoElement, timestamp: number, frameIndex: number) => void;
@@ -126,7 +128,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   onSeedPoint,
   historyData, onResetData, onClearTrail, onFlushHistory, isPlaying, setIsPlaying,
   fpsSettings, setFpsSettings,
-  isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest,
+  isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest, pauseAt,
   timeRange, onChangeTimeRange,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1683,6 +1685,15 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const frac = (t: number) => (duration > 0 ? Math.min(1, Math.max(0, t / duration)) : 0);
   const bandLeft = frac(rangeStart(timeRange));
   const bandRight = duration > 0 ? frac(rangeEnd(timeRange, duration)) : 1;
+
+  /** 追跡が暴れたときの一時停止要求（App から届く） */
+  useEffect(() => {
+    if (!pauseAt) return;
+    const v = videoRef.current;
+    if (v) v.pause();
+    setIsPlaying(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pauseAt]);
 
   // グラフをクリックされたら、その時刻へ移動して止める。
   // 再生したままだとすぐ通り過ぎてしまい、修正できない。

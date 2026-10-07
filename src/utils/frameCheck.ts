@@ -65,6 +65,29 @@ const median = (a: number[]): number => {
 };
 
 /**
+ * 直近の「1 コマの移動量」の中央値。暴れの判定の基準にする。
+ *
+ * 平均ではなく中央値なのは、暴れた 1 コマ自身に基準を引きずられないため。
+ *
+ * @param n さかのぼるコマ数
+ */
+export function recentStep(
+  data: FrameData[], objId: string, n = 8
+): number {
+  const pts: { t: number; p: Point }[] = [];
+  for (let i = data.length - 1; i >= 0 && pts.length <= n + 1; i--) {
+    const it = data[i].objects[objId];
+    if (it && !it.lost) pts.unshift({ t: data[i].timestamp, p: { x: it.xPx, y: it.yPx } });
+  }
+  if (pts.length < 3) return 0;
+  const steps: number[] = [];
+  for (let i = 1; i < pts.length; i++) {
+    steps.push(Math.hypot(pts[i].p.x - pts[i - 1].p.x, pts[i].p.y - pts[i - 1].p.y));
+  }
+  return median(steps);
+}
+
+/**
  * 追跡データの点検。
  *
  * @param data     記録

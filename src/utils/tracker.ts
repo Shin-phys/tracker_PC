@@ -52,6 +52,16 @@ export interface TrackerResult {
   center: Point;      // サブピクセル中心
   state: TrackState;
   score: number;
+  /**
+   * 相関のピークが探索窓の縁に出たか。
+   *
+   * 縁に出るということは、本当の最適解は窓の外にあるかもしれない、
+   * ということ。つまり「追い切れていない」。スコアは高いままなので
+   * ロスト判定には引っかからず、位置だけが窓の縁へ引きずられる。
+   * 実測した衝突動画では、追跡が暴れたコマがちょうどこれだった
+   * （サブピクセル補間も効かないので、座標が整数になって現れる）。
+   */
+  atEdge: boolean;
 }
 
 export class ObjectTracker {
@@ -208,6 +218,12 @@ export class ObjectTracker {
       const score: number = mm.maxVal;
       const loc = mm.maxLoc;
 
+      // ピークが相関マップの縁に出ていないか。
+      // 出ていれば、本当の最適解は探索窓の外にある可能性が高い。
+      const atEdge =
+        loc.x <= 0 || loc.y <= 0 ||
+        loc.x >= resultMat.cols - 1 || loc.y >= resultMat.rows - 1;
+
       // --- 3. 相関ピークのサブピクセル補間（2次曲面フィット） ---
       let dx = 0;
       let dy = 0;
@@ -246,7 +262,7 @@ export class ObjectTracker {
         if (this.cfg.stopOnExit && this.lostStreak >= 2 && this.isNearEdge(this.cx, this.cy, src)) {
           return this.markExited();
         }
-        return this.result('lost', score);
+        return this.result('lost', score, atEdge);
       }
 
       this.lostStreak = 0;
@@ -261,7 +277,7 @@ export class ObjectTracker {
         return this.markExited();
       }
 
-      return this.result('ok', score);
+      return this.result('ok', score, atEdge);
     } catch (err) {
       console.error(`[Tracker:${this.objId}] 更新失敗:`, err);
       return this.result('lost', 0);
@@ -441,7 +457,7 @@ export class ObjectTracker {
 
   // ----------------------------------------------------------
 
-  private result(state: TrackState, score: number): TrackerResult {
+  private result(state: TrackState, score: number, atEdge = false): TrackerResult {
     this.state = state;
     return {
       objId: this.objId,
@@ -454,6 +470,7 @@ export class ObjectTracker {
       center: { x: this.cx, y: this.cy },
       state,
       score,
+      atEdge,
     };
   }
 

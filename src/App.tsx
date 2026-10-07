@@ -17,6 +17,7 @@ import {
 import {
   TimeRange, FULL_RANGE, inRange, normalizeRange, trackedPointAt, trackedStepAt,
 } from './utils/timeRange';
+import { recentStep } from './utils/frameCheck';
 
 import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
@@ -145,6 +146,10 @@ export const App: React.FC = () => {
   /** グラフのクリックから動画をシークさせるための指示。
    *  同じ時刻を続けてクリックしても効くよう、連番を添えて渡す。 */
   const [seekRequest, setSeekRequest] = useState<{ t: number; n: number } | null>(null);
+  /** 追跡が暴れたときに再生を止めるための合図（増えるたびに止める） */
+  const [pauseAt, setPauseAt] = useState(0);
+  /** 止めたあと、同じ再生中に何度も止めないための印 */
+  const haltedRef = useRef(false);
   const seekSeqRef = useRef(0);
 
   // ----- Refs -----
@@ -201,6 +206,8 @@ export const App: React.FC = () => {
   // 再生が止まったら必ず最新状態を反映する
   useEffect(() => {
     if (!isPlaying) flushHistory(true);
+    // 再生を始め直したら、また止められるようにする
+    if (isPlaying) haltedRef.current = false;
   }, [isPlaying, flushHistory]);
 
   // -------------------------------------------------
@@ -729,6 +736,8 @@ export const App: React.FC = () => {
         const seedTol = frameTolerance();
 
         const frameObjects: FrameData['objects'] = {};
+        /** このコマで「飛んだ」物体。判定は全部出そろってから */
+        const suspects: { id: string; step: number; base: number; atEdge: boolean }[] = [];
         const updates: {
           id: string; status: ObjectStatus; roi?: Rect; center?: Point;
         }[] = [];
@@ -773,6 +782,22 @@ export const App: React.FC = () => {
             }
 
             // 画素座標 → 実寸座標。plane モードなら射影変換で遠近を補正する
+            // 暴れの検出。
+            //   1. 相関ピークが探索窓の縁に出た＝追い切れていない
+            //   2. 1 コマの移動量が、直前までの移動量から大きく外れた
+            // スコアは高いまま壊れるので、ロスト判定では拾えない。
+            const prevP = prevFrame ? prevFrame.objects[obj.id] : null;
+            if (prevP && !prevP.lost) {
+              const step = Math.hypot(
+                res.center.x - prevP.xPx, res.center.y - prevP.yPx
+              );
+              const base = recentStep(currentHistory, obj.id, 8);
+              const jumped = base > 0.5 && step > Math.max(base * 3, base + 8);
+              if (res.atEdge || jumped) {
+                suspects.push({ id: obj.id, step, base, atEdge: res.atEdge });
+              }
+            }
+
             const real = toReal(currentCalibration, res.center, src.height);
             const xM = real.x;
             const yM = real.y;
@@ -817,6 +842,23 @@ export const App: React.FC = () => {
         });
 
         // 物体間の相対距離
+
+        // 飛んだのが 1 つだけなら追跡の失敗。2 つ以上が同時に飛んでいたら
+        // 衝突かもしれないので止めない（運動量のやりとりは同時に起きるので、
+        // 本物の衝突では両方の速度が同じコマで変わる）。
+        if (suspects.length === 1 && !haltedRef.current) {
+          const sp = suspects[0];
+          haltedRef.current = true;
+          setPauseAt(n => n + 1);
+          setIsPlaying(false);
+          setNotice(
+            `${sp.id}: ${timestamp.toFixed(3)} s で追跡が飛びました`
+            + `（1 コマ ${Math.round(sp.step)}px・直前までは ${Math.round(sp.base)}px`
+            + `${sp.atEdge ? '・探索窓の縁に張り付き' : ''}）。ここで止めました。`
+            + `点を正しい位置へ直すか、枠を取り直してください。`
+          );
+        }
+
         const distances: FrameData['distances'] = {};
         for (let i = 0; i < activeObjs.length; i++) {
           for (let j = i + 1; j < activeObjs.length; j++) {
@@ -905,6 +947,7 @@ export const App: React.FC = () => {
             onManualPlace={handleManualPlace}
             onManualUndo={handleManualUndo}
         onSeedPoint={handleSeedPoint}
+        pauseAt={pauseAt}
             calibration={calibration}
             onUpdateCalibration={setCalibration}
             onProcessFrame={handleProcessFrame}
