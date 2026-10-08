@@ -26,7 +26,8 @@
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
-  TrackedObject, ScaleCalibration, Rect, Point, FrameData, FpsSettings, HaltInfo
+  TrackedObject, ScaleCalibration, Rect, Point, FrameData, FpsSettings, HaltInfo,
+  SeedResult,
 } from '../types';
 import { recalcScale, pixelDistance } from '../utils/calibration';
 import { applyHomography, invertHomography, Matrix3 } from '../utils/homography';
@@ -51,7 +52,7 @@ import {
   Play, Pause, RotateCcw, Upload, Crosshair, ZoomIn, ZoomOut,
   Eraser, ChevronLeft, ChevronRight, Gauge, Hand, MousePointerClick, Undo2,
   Scissors, CornerDownLeft, CornerDownRight, XCircle, ListVideo, Square as StopIcon,
-  Zap, SkipBack, Scissors as CutIcon, Check,
+  Zap, SkipBack, Scissors as CutIcon, Check, Maximize2,
 } from 'lucide-react';
 
 interface VideoCanvasProps {
@@ -65,8 +66,14 @@ interface VideoCanvasProps {
   onManualPlace: (id: string, center: Point, fileTime: number) => boolean;
   /** 手動トラッキングの直前の 1 点を取り消す */
   onManualUndo: () => boolean;
-  /** 初速ヒント。数コマ先で対象を指す。戻り値は画面に出す一言（空なら何も言わない） */
-  onSeedPoint: (objId: string, point: Point, fileTime: number) => string;
+  /**
+   * 2 点目を指す。数コマ先で同じ対象を指してもらう。
+   * 戻り値は画面に出す一言（空なら何も言わない）。
+   * videoEl を渡すのは、そのコマでテンプレートが滑らないかを実測するため。
+   */
+  onSeedPoint: (
+    objId: string, point: Point, fileTime: number, videoEl?: HTMLVideoElement
+  ) => SeedResult;
   /** 追跡が暴れたときの一時停止要求。増えるたびに止める */
   pauseAt: number;
   /** 追跡が飛んで止めた、という事実。null なら何も起きていない */
@@ -201,8 +208,8 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const [originMode, setOriginMode] = useState(false);
   /** 初速ヒントの指定モード（ON のあいだ、クリックした点が「数コマ先の対象」） */
   const [seedMode, setSeedMode] = useState(false);
-  /** 初速ヒントの結果の一言。普段は null（黙っている） */
-  const [seedMsg, setSeedMsg] = useState<string | null>(null);
+  /** 2 点目の結果。普段は null（黙っている） */
+  const [seedMsg, setSeedMsg] = useState<SeedResult | null>(null);
 
   // ---- 手動トラッキング ----
   /** ON のあいだ、クリックした位置が「その物体のその時刻の位置」になる */
@@ -253,6 +260,8 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const [roiSize, setRoiSize] = useState(RECOMMENDED_ROI_SIZE);
   /** マウスの現在位置（虫めがねの中心に使う。ドラッグ中でなくても出す） */
   const [hoverPt, setHoverPt] = useState<Point | null>(null);
+  /** 枠を置いたら続けて 2 点目へ進む、という待ち状態 */
+  const [pendingSeed, setPendingSeed] = useState(false);
 
   const frameCounterRef = useRef(0);
   const frameIntervalsRef = useRef<number[]>([]);
@@ -471,9 +480,13 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
   useEffect(() => { if (!correctMode) setCorrectMsg(null); }, [correctMode]);
 
-  /** 初速ヒントの一言も、少し経ったら消す（警告は長めに出す） */
+  /**
+   * 2 点目の結果は少し経ったら消す。
+   * ただし直し方（枠の大きさ）を出しているときは消さない。
+   * 押す前に消えるボタンは出さない方がましなので。
+   */
   useEffect(() => {
-    if (!seedMsg) return;
+    if (!seedMsg || seedMsg.betterSize !== undefined) return;
     const id = window.setTimeout(() => setSeedMsg(null), 7000);
     return () => window.clearTimeout(id);
   }, [seedMsg]);
@@ -619,15 +632,43 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     [pickPoints]
   );
 
+  /**
+   * 切ったあと、枠を置いたら続けて 2 点目を指してもらうための印。
+   *
+   * なぜ続けるのか。枠を置き直しただけでは、同じ場所でまた壊れる。
+   * 壊れた理由は「そのコマのテンプレートと、そのコマの動きの大きさ」で
+   * 決まっていて、枠を引き直してもどちらも変わらないことが多い。
+   * 2 点目を指してもらえば、(1) 最初のコマから予測が効き、
+   * (2) その枠が本当にその対象を見つけられるかを実測できる。
+   * 止まった直後は、この 2 つがどちらも要る場面そのもの。
+   */
+  const chainSeedRef = useRef(false);
+
+  /**
+   * 枠が確定したときに呼ぶ。切った直後なら 2 点目へ続ける。
+   *
+   * ここで直接 startSeed を呼べないのは、枠の確定が App 側の state を
+   * 経由するため。このレンダーの objects にはまだ新しい initialTime が
+   * 入っていないので、送る先のコマを間違える。印だけ立てて、
+   * 反映されてから進む。
+   */
+  const afterRoiPlaced = useCallback(() => {
+    if (!chainSeedRef.current) return;
+    chainSeedRef.current = false;
+    setPendingSeed(true);
+  }, []);
+
   /** 選んだ点より後の記録を捨てる */
   const cutAt = useCallback((q: TrailPoint) => {
     const dropped = onTruncateAfter(q.time);
     setPickMode(false);
     setPickIdx(null);
     setRoiCenter(null);
+    chainSeedRef.current = true;
     setCutMsg(
       dropped > 0
-        ? `${q.time.toFixed(3)} s より後の ${dropped} コマを捨てました。枠を置き直してください`
+        ? `${q.time.toFixed(3)} s より後の ${dropped} コマを捨てました。`
+          + `枠を置き直すと、続けて 2 点目を聞きます`
         : `${q.time.toFixed(3)} s まで残しました（捨てるコマはありませんでした）`
     );
   }, [onTruncateAfter]);
@@ -781,7 +822,18 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       videoRef.current || undefined
     );
     setRoiCenter(null);
-  }, [roiCenter, roiSize, selectedObjId, onUpdateRoi]);
+    afterRoiPlaced();
+  }, [roiCenter, roiSize, selectedObjId, onUpdateRoi, afterRoiPlaced]);
+
+  // 枠が App 側へ反映されたら 2 点目へ進む
+  useEffect(() => {
+    if (!pendingSeed) return;
+    const o = objects.find(x => x.id === selectedObjId);
+    if (!o || !o.initialRoi || o.initialTime === null) return;
+    setPendingSeed(false);
+    void startSeed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingSeed, objects, selectedObjId]);
 
   /**
    * 虫めがねを出す場面か。
@@ -818,8 +870,10 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     if (dragMode === 'seed') {
       const tip = dragCurrent ?? dragStart;
       if (tip) {
-        const msg = onSeedPoint(selectedObjId, tip, frameTimeRef.current);
-        setSeedMsg(msg || null);
+        const r = onSeedPoint(
+          selectedObjId, tip, frameTimeRef.current, videoRef.current || undefined
+        );
+        setSeedMsg(r.msg ? r : null);
       }
       setSeedMode(false);
       void goToStart();
@@ -873,6 +927,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           videoRef.current || undefined
         );
         setRoiCenter(null);
+        afterRoiPlaced();
       } else {
         // 引かずに押しただけ＝「中心はここ」。大きさはこのあと決める。
         // マウスでも、対象が小さく写っているときは端まで正確に引けない。
@@ -888,6 +943,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   }, [
     dragMode, dragStart, dragCurrent, isSquareMode, selectedObjId,
     onUpdateRoi, applyLine, setIsLineCalibrating, manualObjId, onManualCorrect,
+    afterRoiPlaced,
   ]);
 
 
@@ -2316,11 +2372,36 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         {seedMsg && !seedMode && (
           <div style={{
             position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
-            background: 'rgba(239,68,68,0.95)', color: '#fff', padding: '7px 16px',
-            borderRadius: 20, fontSize: '0.8rem', fontWeight: 700, pointerEvents: 'none',
-            maxWidth: '80%', lineHeight: 1.5, boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
+            width: 'min(560px, 92%)', background: 'rgba(15,23,42,0.96)',
+            border: '1.5px solid rgba(239,68,68,0.6)', borderRadius: 12,
+            padding: '11px 14px', boxShadow: '0 6px 24px rgba(0,0,0,0.6)', zIndex: 5,
           }}>
-            ⚠ {seedMsg}
+            <div style={{
+              fontSize: '0.8rem', color: '#fca5a5', lineHeight: 1.6, fontWeight: 600,
+            }}>
+              ⚠ {seedMsg.msg}
+            </div>
+            {seedMsg.betterSize !== undefined && (
+              <button className="btn btn-primary btn-sm" style={{ marginTop: 9 }}
+                onClick={() => {
+                  const n = seedMsg.betterSize as number;
+                  setRoiSize(n);
+                  setSeedMsg(null);
+                  // 中心は今の枠の中心。大きさだけ測った値へ置き換える
+                  const o = objects.find(x => x.id === selectedObjId);
+                  const base = o?.initialRoi ?? o?.roi;
+                  if (base) {
+                    setRoiCenter({
+                      x: base.x + base.width / 2,
+                      y: base.y + base.height / 2,
+                    });
+                  }
+                  void goToStart();
+                }}>
+                <Maximize2 size={14} />
+                枠を {seedMsg.betterSize}px にして置き直す
+              </button>
+            )}
           </div>
         )}
 

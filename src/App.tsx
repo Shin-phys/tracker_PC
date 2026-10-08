@@ -3,10 +3,10 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   TrackedObject, ScaleCalibration, FilterSettings,
   FrameData, Rect, FpsSettings, TrackingSettings,
-  DEFAULT_TRACKING, ObjectStatus, Point, SeedHint, HaltInfo,
+  DEFAULT_TRACKING, ObjectStatus, Point, SeedHint, HaltInfo, SeedResult,
 } from './types';
 import { waitForOpenCV } from './utils/opencvLoader';
-import { ObjectTracker, MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE } from './utils/tracker';
+import { ObjectTracker, MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE, SLIDE_SHARPNESS } from './utils/tracker';
 import { FrameSource } from './utils/frameSource';
 import { toReal } from './utils/calibration';
 import { medianDt } from './utils/butterworth';
@@ -436,14 +436,16 @@ export const App: React.FC = () => {
    * 走らせる前に止める。
    */
   const handleSeedPoint = useCallback(
-    (objId: string, point: Point, fileTime: number): string => {
+    (
+      objId: string, point: Point, fileTime: number, videoEl?: HTMLVideoElement
+    ): SeedResult => {
       const obj = objectsRef.current.find(o => o.id === objId);
       if (!obj || !obj.initialRoi || obj.initialTime === null) {
-        return '先に枠を置いてください';
+        return { msg: '先に枠を置いてください' };
       }
       const fps = Math.max(1, fpsSettings.value);
       const frames = Math.round((fileTime - obj.initialTime) * fps);
-      if (frames < 1) return 'コマを送ってから指してください';
+      if (frames < 1) return { msg: 'コマを送ってから指してください' };
 
       // 起点は「枠を置いた位置」。center は追跡中に上書きされるので、
       // 一度走らせたあとに初速を教えると、最後に到達した位置から測って
@@ -469,12 +471,57 @@ export const App: React.FC = () => {
       const step = Math.hypot(perFrame.x, perFrame.y);
       const size = Math.min(obj.initialRoi.width, obj.initialRoi.height) * 0.8;
       if (step > size) {
-        return `1 コマで ${step.toFixed(0)}px 動いています。対象より大きいので、`
-          + `このままでは追えません。撮影 fps を上げるか、対象を大きく写してください。`;
+        return {
+          msg: `1 コマで ${step.toFixed(0)}px 動いています。対象より大きいので、`
+            + `このままでは追えません。撮影 fps を上げるか、対象を大きく写してください。`,
+        };
       }
-      return '';
+
+      // ---- 枠が滑らないかを、ここで実測する ----
+      //
+      // 2 点目を指してもらう本当の値打ちはここにある。枠を置いたコマの
+      // テンプレートを、数コマ先の「人が指した位置」で探してみれば、
+      // そのテンプレートが本当にその対象を見つけられるのかが分かる。
+      //
+      // 1 コマだけでは測れない。同じコマで測るとセンサーノイズが模様として
+      // 効いてしまい、一様な面でも「鋭いピーク」が出る（合成データで実測）。
+      // ノイズは次のコマに同じ形で現れないので、追跡の役には立たない。
+      //
+      // 実際に効くのはこの場合。対象より小さい枠を対象の内側に置くと、
+      // 枠の中は一様なので、どこへずれても同じくらい一致する。スコアは
+      // 高いまま位置だけが流れるので、ロスト判定にも引っかからない。
+      // 利用者の衝突動画で、小さい方の追跡が暴れていた原因がこれだった。
+      if (videoEl) {
+        try {
+          const src = getFrameSource();
+          if (src.capture(videoEl)) {
+            const pr = t ? t.probe(src, point) : null;
+            if (pr && pr.sharpness < SLIDE_SHARPNESS) {
+              const sug = t ? t.suggestSize(src, point) : null;
+              if (sug) {
+                return {
+                  msg: `この枠では滑ります。枠の中が一様で、ずらしても同じくらい`
+                    + `一致してしまいます（ピークの鋭さ ${pr.sharpness.toFixed(2)}）。`
+                    + `枠 ${sug.size}px なら対象の輪郭が入り、`
+                    + `${sug.sharpness.toFixed(2)} まで上がります。`,
+                  betterSize: sug.size,
+                };
+              }
+              return {
+                msg: `この枠では滑ります。枠の中にも周りにも、コマが変わっても`
+                  + `形の変わらないものがありません（ピークの鋭さ `
+                  + `${pr.sharpness.toFixed(2)}）。マーカーを貼るか、`
+                  + `模様のある部分が入るように囲んでください。`,
+              };
+            }
+          }
+        } catch (err) {
+          console.error('[App] 枠の測定に失敗:', err);
+        }
+      }
+      return { msg: '' };
     },
-    [fpsSettings.value]
+    [fpsSettings.value, getFrameSource]
   );
 
   // -------------------------------------------------

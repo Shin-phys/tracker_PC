@@ -46,6 +46,38 @@ export const MIN_ROI_SIZE = 12;
 /** これを下回ると精度が落ちやすいので UI で警告する目安 [px] */
 export const RECOMMENDED_ROI_SIZE = 20;
 
+/**
+ * 「枠が滑る」と判定するピークの鋭さのしきい値。
+ *
+ * 鋭さ＝(指した位置の相関) − (テンプレートの 35% だけずらした 8 方向の平均)。
+ * 枠の中に、コマが変わっても形の変わらないものが入っていなければ、
+ * ずらしても相関が落ちない＝どこへずれても同じくらい一致する。
+ *
+ * 合成データでの実測（別ノイズを乗せた 2 コマ間で測定）
+ *   一様な物体の内側だけを枠 50 で囲む   −0.03   ← 滑る
+ *   同じ物体を輪郭まで含めて枠 180        0.89
+ *   一様な壁の上の白シールを枠 30         0.99
+ *   物体の縁をまたぐ枠 50                0.50
+ *   テクスチャ背景だけを枠 40             1.00
+ * 合格側はすべて 0.5 以上、滑る側は 0 近傍なので、0.2 で分かれる。
+ *
+ * **1 コマだけでは測れない**。同じコマで測ると、センサーノイズが
+ * 「模様」として効いてしまい、一様な面でも鋭さ 1.0 が出る（実測）。
+ * ノイズは次のコマには同じ形で現れないので、追跡の役には立たない。
+ * だから測定には必ず別のコマを使う。
+ */
+export const SLIDE_SHARPNESS = 0.2;
+
+/** テンプレートが追跡に足りるかの測定結果 */
+export interface TemplateProbe {
+  /** 指した位置での相関 */
+  peak: number;
+  /** ピークの鋭さ。SLIDE_SHARPNESS を下回ると滑る */
+  sharpness: number;
+  /** 指した位置から、実際のピークまでの距離 [px] */
+  offset: number;
+}
+
 export interface TrackerResult {
   objId: string;
   roi: Rect;
@@ -84,6 +116,18 @@ export class ObjectTracker {
 
   /** 重心計算に使う局所窓の半径 */
   private half = 8;
+
+  /**
+   * 枠を置いたコマの、枠の周辺を取っておいたもの。
+   *
+   * 「枠をいくつにすれば追えるか」を後から測るのに使う。テンプレートは
+   * 枠を置いたコマの画から作るので、数コマ先へ送ったあとではもう作れない。
+   * 枠より広く取ってあるぶんだけ、大きい枠を試せる。
+   */
+  private home: RegionSample | null = null;
+  /** home の中での枠の中心 */
+  private homeCx = 0;
+  private homeCy = 0;
 
   constructor(cv: any, objId: string, cfg: TrackingSettings) {
     this.cv = cv;
@@ -132,6 +176,17 @@ export class ObjectTracker {
 
     const region = src.getRegion(x, y, w, h);
     if (!region) return false;
+
+    // 後から枠を広げて試せるように、周辺を広めに取っておく。
+    // 4 倍まで、ただし 480px で打ち切る（それ以上は実用的な枠ではない）
+    const span = Math.min(480, Math.max(w, h) * 4);
+    const hx = Math.round(x + w / 2 - span / 2);
+    const hy = Math.round(y + h / 2 - span / 2);
+    this.home = src.getRegion(hx, hy, span, span);
+    if (this.home) {
+      this.homeCx = x + w / 2 - this.home.x0;
+      this.homeCy = y + h / 2 - this.home.y0;
+    }
 
     try {
       const mat = new this.cv.Mat(region.height, region.width, this.cv.CV_8UC1);
@@ -183,6 +238,147 @@ export class ObjectTracker {
     this.vx = v.x;
     this.vy = v.y;
     this.hasVelocity = true;
+  }
+
+  // ----------------------------------------------------------
+  // テンプレートが追跡に足りるかを測る
+  // ----------------------------------------------------------
+
+  /**
+   * ある大きさの枠のテンプレートを、別のコマの指定位置で探してみる。
+   *
+   * @param src  別のコマ（枠を置いたコマではない）
+   * @param at   そのコマで対象が居る位置（人が指した点）
+   * @param size 試す枠の一辺 [px]。省略すると今のテンプレートの大きさ
+   */
+  private probeSize(src: FrameSource, at: Point, size: number): TemplateProbe | null {
+    const home = this.home;
+    if (!home) return null;
+    const half = Math.round(size / 2);
+    // home の中からこの大きさのテンプレートが切り出せるか
+    const tx = Math.round(this.homeCx) - half;
+    const ty = Math.round(this.homeCy) - half;
+    const tw = half * 2;
+    if (tx < 0 || ty < 0 || tx + tw > home.width || ty + tw > home.height) return null;
+    if (tw < MIN_ROI_SIZE) return null;
+
+    // 探索窓は指した点が中心。人の指し間違いを吸収できるだけの広さにする
+    const margin = Math.max(8, Math.round(tw * 0.5));
+    const sw = tw + margin * 2;
+    const region = src.getRegion(
+      Math.round(at.x) - tw / 2 - margin,
+      Math.round(at.y) - tw / 2 - margin,
+      sw, sw
+    );
+    if (!region || region.width < tw || region.height < tw) return null;
+
+    let tplMat: any = null;
+    let searchMat: any = null;
+    let resultMat: any = null;
+    try {
+      // home から切り出してテンプレートにする
+      const buf = new Uint8Array(tw * tw);
+      for (let r = 0; r < tw; r++) {
+        const srcOff = (ty + r) * home.width + tx;
+        buf.set(home.gray.subarray(srcOff, srcOff + tw), r * tw);
+      }
+      tplMat = new this.cv.Mat(tw, tw, this.cv.CV_8UC1);
+      tplMat.data.set(buf);
+
+      searchMat = new this.cv.Mat(region.height, region.width, this.cv.CV_8UC1);
+      searchMat.data.set(region.gray);
+      resultMat = new this.cv.Mat();
+      this.cv.matchTemplate(searchMat, tplMat, resultMat, this.cv.TM_CCOEFF_NORMED);
+
+      const cols = resultMat.cols;
+      const rows = resultMat.rows;
+      const data = resultMat.data32F as Float32Array;
+      const val = (cx: number, cy: number): number | null => {
+        if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return null;
+        return data[cy * cols + cx];
+      };
+
+      // 指した点に対応する相関マップ上の位置。
+      // getRegion は画面端で切り詰めるので、要求した座標ではなく
+      // 実際に返ってきた region.x0 / y0 から出す。
+      const pxc = Math.round(at.x - tw / 2) - region.x0;
+      const pyc = Math.round(at.y - tw / 2) - region.y0;
+
+      // 人の指し間違いを許して、近傍の最大値を本当のピークとする
+      const slack = Math.max(3, Math.round(tw * 0.25));
+      let bestX = pxc;
+      let bestY = pyc;
+      let best = -2;
+      for (let dy = -slack; dy <= slack; dy++) {
+        for (let dx = -slack; dx <= slack; dx++) {
+          const v = val(pxc + dx, pyc + dy);
+          if (v !== null && v > best) { best = v; bestX = pxc + dx; bestY = pyc + dy; }
+        }
+      }
+      if (best < -1) return null;
+
+      // ピークから 35% ずらした 8 方向の平均。落ちなければ滑る
+      const r = Math.max(3, Math.round(tw * 0.35));
+      const dirs: [number, number][] = [
+        [r, 0], [-r, 0], [0, r], [0, -r], [r, r], [r, -r], [-r, r], [-r, -r],
+      ];
+      let sum = 0;
+      let n = 0;
+      dirs.forEach(([dx, dy]) => {
+        const v = val(bestX + dx, bestY + dy);
+        if (v !== null) { sum += v; n++; }
+      });
+      const ring = n > 0 ? sum / n : best;
+
+      return {
+        peak: best,
+        sharpness: best - ring,
+        offset: Math.hypot(bestX - pxc, bestY - pyc),
+      };
+    } catch (err) {
+      console.error(`[Tracker:${this.objId}] テンプレートの測定に失敗:`, err);
+      return null;
+    } finally {
+      if (tplMat) try { tplMat.delete(); } catch (_) { /* noop */ }
+      if (searchMat) try { searchMat.delete(); } catch (_) { /* noop */ }
+      if (resultMat) try { resultMat.delete(); } catch (_) { /* noop */ }
+    }
+  }
+
+  /**
+   * いまの枠が追跡に足りるかを測る。
+   *
+   * 枠を置いたコマのテンプレートを、数コマ先のコマの「人が指した位置」で
+   * 探す。鋭さが SLIDE_SHARPNESS を下回れば、枠の中にコマが変わっても
+   * 形の変わらないものが入っていない＝どこへずれても同じくらい一致する。
+   */
+  public probe(src: FrameSource, at: Point): TemplateProbe | null {
+    return this.probeSize(src, at, Math.max(this.tw, this.th));
+  }
+
+  /**
+   * 滑らない枠の大きさを探す。
+   *
+   * いまの大きさから順に広げて、最初に合格した大きさを返す。
+   * 合成データでは、直径 176px の一様な物体に対して 50〜120px の枠が
+   * すべて鋭さ 0 近傍、150px で 0.89 に跳ねた。輪郭が入ったところで
+   * 初めて「コマが変わっても形の変わらないもの」が枠に入る。
+   *
+   * null が返るのは、広げても見つからなかったとき。その場所には
+   * 追える模様が無いので、枠の大きさでは解決しない。
+   */
+  public suggestSize(src: FrameSource, at: Point): { size: number; sharpness: number } | null {
+    const base = Math.max(this.tw, this.th);
+    const limit = this.home ? this.home.width : base;
+    for (let i = 1; i <= 8; i++) {
+      const size = Math.round(base * (1 + i * 0.35));
+      if (size > limit) break;
+      const pr = this.probeSize(src, at, size);
+      if (pr && pr.sharpness >= SLIDE_SHARPNESS) {
+        return { size, sharpness: pr.sharpness };
+      }
+    }
+    return null;
   }
 
   public update(src: FrameSource): TrackerResult {
@@ -475,6 +671,7 @@ export class ObjectTracker {
   }
 
   public cleanup() {
+    this.home = null;
     if (this.templateMat) {
       try { this.templateMat.delete(); } catch (_) { /* noop */ }
       this.templateMat = null;
