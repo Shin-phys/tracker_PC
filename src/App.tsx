@@ -24,6 +24,7 @@ import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
 import { ControlPanel } from './components/ControlPanel';
 import { DataPanel } from './components/DataPanel';
+import { AnalysisPanel } from './components/AnalysisPanel';
 import { AxisKey } from './components/MotionGraph';
 import { DEFAULT_SMOOTH_WINDOW } from './utils/graphSmooth';
 
@@ -1383,6 +1384,14 @@ export const App: React.FC = () => {
             graphSmoothWindow={graphSmoothWindow}
             onChangeGraphSmooth={setGraphSmooth}
             onChangeGraphSmoothWindow={setGraphSmoothWindow}
+          />
+          <AnalysisPanel
+            objects={objects}
+            historyData={historyData}
+            timeRange={timeRange}
+            fpsSettings={fpsSettings}
+            calibration={calibration}
+            onSeek={handleSeek}
           />
         </aside>
       </main>

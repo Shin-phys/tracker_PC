@@ -550,3 +550,17 @@ kbd {
 .graph-full .legend {
   flex-shrink: 0;
 }
+
+/* ---- 注意書きの枠（解析パネルなどで使う） ---- */
+.notice {
+  padding: 10px 13px;
+  border-radius: 9px;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.notice-info {
+  background: rgba(99, 102, 241, 0.10);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  color: var(--text-secondary);
+}
