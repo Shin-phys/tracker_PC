@@ -229,8 +229,14 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
    * ON のあいだ、飛んだ時刻の手前の記録点が候補として並ぶ。
    */
   const [pickMode, setPickMode] = useState(false);
-  /** マウスが乗っている候補の時刻 */
-  const [pickHover, setPickHover] = useState<number | null>(null);
+  /**
+   * 「ここまでは正しい」で選んでいる候補の番号。
+   *
+   * 選ぶだけでは切らない。選ぶとそのコマへ送るので、点がマーカーの上に
+   * 乗っているかを目で確かめてから決定できる。確かめられないと、
+   * どれが正解なのか人には分からない。
+   */
+  const [pickIdx, setPickIdx] = useState<number | null>(null);
   /** 切り落としたあとの一言 */
   const [cutMsg, setCutMsg] = useState<string | null>(null);
 
@@ -578,19 +584,53 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     return steps.length > 0 ? steps[Math.floor(steps.length / 2)] : 0;
   }, [pickPoints]);
 
-  /** いちばん近い候補点（しきい値内）。pick モードの当たり判定 */
-  const nearestPick = useCallback(
-    (pt: Point): TrailPoint | null => {
-      let best: TrailPoint | null = null;
+  /** 乱れ始めた最初の候補。ここから後は信用しない */
+  const pickWarnFrom = useMemo(() => {
+    if (pickMedianStep <= 0) return pickPoints.length;
+    for (let i = 0; i < pickPoints.length; i++) {
+      if (pickPoints[i].step > Math.max(pickMedianStep * 2, pickMedianStep + 4)) return i;
+    }
+    return pickPoints.length;
+  }, [pickPoints, pickMedianStep]);
+
+  /**
+   * アプリ側の答え。乱れ始めた 1 つ手前。
+   *
+   * 既定を入れておくのが肝。「正しい最後の点を選べ」と言われても、
+   * 何を基準に選ぶのかが分からなければ手が止まる。まず答えを置いて、
+   * 違うと思ったときだけ動かしてもらう形にする。
+   */
+  const pickSuggest = useMemo(() => {
+    if (pickPoints.length === 0) return null;
+    return Math.max(0, Math.min(pickPoints.length - 1, pickWarnFrom - 1));
+  }, [pickPoints, pickWarnFrom]);
+
+  /** いちばん近い候補の番号（しきい値内）。見つからなければ -1 */
+  const nearestPickIndex = useCallback(
+    (pt: Point): number => {
+      let best = -1;
       let bestD = HANDLE_RADIUS * 2;
-      pickPoints.forEach(q => {
+      pickPoints.forEach((q, i) => {
         const d = pixelDistance(pt, q.point);
-        if (d < bestD) { bestD = d; best = q; }
+        if (d < bestD) { bestD = d; best = i; }
       });
       return best;
     },
     [pickPoints]
   );
+
+  /** 選んだ点より後の記録を捨てる */
+  const cutAt = useCallback((q: TrailPoint) => {
+    const dropped = onTruncateAfter(q.time);
+    setPickMode(false);
+    setPickIdx(null);
+    setRoiCenter(null);
+    setCutMsg(
+      dropped > 0
+        ? `${q.time.toFixed(3)} s より後の ${dropped} コマを捨てました。枠を置き直してください`
+        : `${q.time.toFixed(3)} s まで残しました（捨てるコマはありませんでした）`
+    );
+  }, [onTruncateAfter]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!videoLoaded) return;
@@ -598,19 +638,10 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
     // ---------- 「ここまでは正しい」を選ぶ ----------
     // ほかのどのモードよりも先に見る。選び終わるまで他の操作はさせない。
+    // クリックでは切らない。選ぶだけにして、そのコマへ送って見せる。
     if (pickMode) {
-      const q = nearestPick(pt);
-      if (!q) return;
-      const dropped = onTruncateAfter(q.time);
-      setPickMode(false);
-      setPickHover(null);
-      setRoiCenter(null);
-      setCutMsg(
-        dropped > 0
-          ? `${q.time.toFixed(3)} s より後の ${dropped} コマを捨てました。枠を置き直してください`
-          : `${q.time.toFixed(3)} s まで残しました（捨てるコマはありませんでした）`
-      );
-      void seekTo(q.time);
+      const i = nearestPickIndex(pt);
+      if (i >= 0) setPickIdx(i);
       return;
     }
 
@@ -766,12 +797,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     if (wantLoupe || dragMode) {
       setHoverPt(getCanvasCoordinates(e));
     }
-    if (pickMode) {
-      const hp = getCanvasCoordinates(e);
-      const q = nearestPick(hp);
-      setPickHover(q ? q.time : null);
-      return;
-    }
+    if (pickMode) return;
     if (!dragMode) return;
     const pt = getCanvasCoordinates(e);
     setDragCurrent(pt);
@@ -865,6 +891,52 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   ]);
 
 
+  // 候補を選ぶモードに入ったら、まずアプリ側の答えを置く
+  useEffect(() => {
+    if (!pickMode) { setPickIdx(null); return; }
+    setPickIdx(prev => (prev === null ? pickSuggest : prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickMode, pickSuggest]);
+
+  /**
+   * 選んだ候補のコマへ送る。
+   *
+   * これが要る理由。候補を選ぶ判断は「点がマーカーの上に乗っているか」で、
+   * それは**そのコマの映像を見ないと決められない**。止まったコマのまま
+   * 点だけを並べても、どれが正解なのかは分からない。
+   */
+  useEffect(() => {
+    if (!pickMode || pickIdx === null) return;
+    const q = pickPoints[pickIdx];
+    if (!q) return;
+    void seekTo(q.time);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickMode, pickIdx]);
+
+  /** 候補を選ぶあいだの矢印キーと Enter */
+  useEffect(() => {
+    if (!pickMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const d = e.key === 'ArrowLeft' ? -1 : 1;
+        setPickIdx(i => {
+          if (i === null) return pickSuggest;
+          return Math.max(0, Math.min(pickPoints.length - 1, i + d));
+        });
+        return;
+      }
+      if (e.key === 'Enter' && pickIdx !== null && pickPoints[pickIdx]) {
+        e.preventDefault();
+        cutAt(pickPoints[pickIdx]);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pickMode, pickIdx, pickPoints, pickSuggest, cutAt]);
+
   /** 切り落としの一言は少し長めに出す（次にすることが書いてある） */
   useEffect(() => {
     if (!cutMsg) return;
@@ -901,7 +973,6 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && pickMode) {
         setPickMode(false);
-        setPickHover(null);
         return;
       }
       if (e.key === 'Escape' && seedMode) {
@@ -939,6 +1010,10 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       }
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+      // 候補を選んでいる間は矢印キーを譲る。
+      // 譲らないと、← で選択が動くのと同時に校正点まで 1px ずれる。
+      if (pickMode) return;
 
       const lineReady = calibration.mode === 'line' && calibration.linePoints.length === 2;
       const planeReady = calibration.mode === 'plane' && calibration.planePoints.length === 4;
@@ -1563,29 +1638,29 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     // それより前を薄く描く。どこから色が変わるかが、そのまま
     // 「ドリフトが始まったあたり」の目印になる。
     if (pickMode && pickPoints.length > 0) {
-      const warnFrom = (() => {
-        if (pickMedianStep <= 0) return pickPoints.length;
-        for (let i = 0; i < pickPoints.length; i++) {
-          if (pickPoints[i].step > Math.max(pickMedianStep * 2, pickMedianStep + 4)) {
-            return i;
-          }
-        }
-        return pickPoints.length;
-      })();
-
       ctx.save();
       pickPoints.forEach((q, i) => {
-        const warn = i >= warnFrom;
-        const on = pickHover !== null && Math.abs(q.time - pickHover) < 1e-9;
-        const r = (on ? 9 : 5.5) * k;
+        const warn = i >= pickWarnFrom;
         ctx.beginPath();
-        ctx.arc(q.point.x, q.point.y, r, 0, Math.PI * 2);
+        ctx.arc(q.point.x, q.point.y, 5.5 * k, 0, Math.PI * 2);
         ctx.fillStyle = warn ? 'rgba(239,68,68,0.9)' : 'rgba(245,158,11,0.85)';
         ctx.fill();
-        ctx.strokeStyle = on ? '#ffffff' : 'rgba(0,0,0,0.6)';
-        ctx.lineWidth = (on ? 2.6 : 1.6) * k;
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 1.6 * k;
         ctx.stroke();
       });
+      // 選択中は二重の輪で囲む。どれを選んでいるかが分からないまま
+      // 「ここで切る」を押させてはいけない。
+      if (pickIdx !== null && pickPoints[pickIdx]) {
+        const c = pickPoints[pickIdx].point;
+        [['rgba(0,0,0,0.6)', 4], ['#ffffff', 2.2]].forEach(([col, w]) => {
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 13 * k, 0, Math.PI * 2);
+          ctx.strokeStyle = col as string;
+          ctx.lineWidth = (w as number) * k;
+          ctx.stroke();
+        });
+      }
       ctx.restore();
     }
 
@@ -1608,14 +1683,17 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     dragMode, dragStart, dragCurrent, isSquareMode, calibration,
     correctMode, isPlaying, manualObjId, nearestFrameIndex, grabPoint,
     originMode, manualMode, frameTolerance, issueTimes, isLineCalibrating, calibFocus,
-    pickMode, pickPoints, pickHover, pickMedianStep, roiCenter, roiSize,
+    pickMode, pickPoints, pickWarnFrom, pickIdx, roiCenter, roiSize,
   ]);
 
   renderRef.current = renderFrame;
 
   /** 虫めがねを出す位置（映像の表示領域の中での画面座標） */
   const loupeAt = (() => {
-    const base = dragCurrent ?? hoverPt;
+    // 候補を選んでいる間は、選択中の点を拡大する。
+    // 「点がマーカーに乗っているか」の判断は拡大なしでは決められない。
+    const picked = pickMode && pickIdx !== null ? pickPoints[pickIdx]?.point : null;
+    const base = picked ?? dragCurrent ?? hoverPt;
     const show =
       !!base && (
         !!dragMode || pickMode || !!roiCenter || seedMode || originMode
@@ -2334,35 +2412,63 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         )}
 
         {/* ---- どこまで戻すかを選ぶ ---- */}
+        {/*
+            下の細い帯にしてある。選ぶ対象は映像の上の点なので、覆ってはいけない。
+            選択を動かすたびにそのコマへ送るので、点がマーカーに乗っているかを
+            見ながら決められる。
+        */}
         {pickMode && (
           <div style={{
-            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
-            width: 'min(560px, 92%)', background: 'rgba(15,23,42,0.96)',
-            border: '1.5px solid rgba(245,158,11,0.6)', borderRadius: 12,
-            padding: '12px 14px', boxShadow: '0 6px 24px rgba(0,0,0,0.6)', zIndex: 5,
+            position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
+            width: 'min(620px, 94%)', background: 'rgba(15,23,42,0.94)',
+            border: '1px solid rgba(245,158,11,0.5)', borderRadius: 12,
+            padding: '9px 12px', boxShadow: '0 4px 20px rgba(0,0,0,0.6)', zIndex: 5,
           }}>
-            <div style={{ fontWeight: 700, fontSize: '0.86rem', color: '#fbbf24', marginBottom: 6 }}>
-              正しい最後の点をクリック
-            </div>
             <div style={{
-              fontSize: '0.78rem', color: 'var(--text-secondary)', lineHeight: 1.65, marginBottom: 10,
+              fontSize: '0.74rem', color: 'var(--text-secondary)',
+              lineHeight: 1.5, marginBottom: 7,
             }}>
-              赤い点は、そこまでの移動量が普段から外れているコマです。
-              クリックした点より後の記録を捨てて、枠をその位置へ戻します。
-              {pickHover !== null && (
-                <>
-                  <br />
-                  <span className="mono" style={{ color: '#fbbf24', fontWeight: 700 }}>
-                    {pickHover.toFixed(3)} s まで残す
-                  </span>
-                </>
-              )}
+              点がマーカーに乗っている
+              <b style={{ color: '#fbbf24' }}>最後のコマ</b>へ。
+              ← → か点のクリックで選ぶと、そのコマが映ります（赤い点は移動量が普段から外れたコマ）。
             </div>
-            <button className="btn btn-secondary btn-sm"
-              onClick={() => { setPickMode(false); setPickHover(null); }}>
-              <XCircle size={14} />
-              やめる
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button className="btn btn-secondary btn-sm"
+                disabled={pickIdx === null || pickIdx <= 0}
+                onClick={() => setPickIdx(i => (i === null ? null : Math.max(0, i - 1)))}>
+                <ChevronLeft size={15} />
+              </button>
+              <button className="btn btn-secondary btn-sm"
+                disabled={pickIdx === null || pickIdx >= pickPoints.length - 1}
+                onClick={() => setPickIdx(i =>
+                  (i === null ? null : Math.min(pickPoints.length - 1, i + 1)))}>
+                <ChevronRight size={15} />
+              </button>
+              <span className="mono" style={{
+                fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)',
+              }}>
+                {pickIdx !== null && pickPoints[pickIdx]
+                  ? `${pickPoints[pickIdx].time.toFixed(3)} s`
+                  : '—'}
+              </span>
+              <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', flex: 1 }}>
+                {pickIdx !== null && pickPoints.length - 1 - pickIdx > 0
+                  ? `後ろ ${pickPoints.length - 1 - pickIdx} 点を捨てる`
+                  : 'この点まで残す'}
+              </span>
+              <button className="btn btn-primary btn-sm"
+                disabled={pickIdx === null || !pickPoints[pickIdx]}
+                onClick={() => {
+                  if (pickIdx !== null && pickPoints[pickIdx]) cutAt(pickPoints[pickIdx]);
+                }}>
+                <CutIcon size={14} />
+                ここで切る
+              </button>
+              <button className="btn btn-secondary btn-sm"
+                onClick={() => { setPickMode(false); onDismissHalt(false); }}>
+                <XCircle size={14} />
+              </button>
+            </div>
           </div>
         )}
 
