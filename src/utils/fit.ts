@@ -338,3 +338,98 @@ export function velocityOf(
   }
   return null;
 }
+
+// ------------------------------------------------------------
+// a-t（2 階差分で出した加速度の時間変化）
+// ------------------------------------------------------------
+
+/**
+ * 2 階差分で加速度の時間変化を出す。
+ *
+ * **Δt を選ばせることが前提**の機能。k=1（隣のコマ）で出すと、合成データ
+ * （240fps・位置ノイズ 0.5mm の自由落下）では標準偏差が 64 m/s² になり、
+ * 真値 9.8 がノイズに埋もれる。同じデータでも k=8 なら 0.88 になる。
+ * 分母が (k dt)² なので、k を 2 倍にするとノイズの効きは 1/4。
+ *
+ * 「a-t 図は出せない」のではなく、「Δt を選ばずに出した a-t 図は意味が
+ * ない」だけ。選ばせたうえで、ばらつきも一緒に見せるなら成立する。
+ *
+ * 広げるほど「その区間で加速度が一定」という前提が効いてくるので、
+ * 本当に加速度が変化する運動では平均が鈍る。そのトレードオフは
+ * 人が決めるしかない。
+ */
+export function secondDiffSeries(
+  t: number[], y: number[], k: number
+): { t: number; a: number }[] {
+  const n = Math.min(t.length, y.length);
+  const out: { t: number; a: number }[] = [];
+  if (n < 2 * k + 1 || k < 1) return out;
+  // 刻みは中央値で代表させる（シークの丸めで 1 コマ分だけ揺れることがある）
+  const steps: number[] = [];
+  for (let i = 1; i < n; i++) steps.push(t[i] - t[i - 1]);
+  steps.sort((a, b) => a - b);
+  const dt0 = steps[Math.floor(steps.length / 2)];
+  if (!(dt0 > 0)) return out;
+  const h = k * dt0;
+  for (let i = k; i < n - k; i++) {
+    out.push({ t: t[i], a: (y[i + k] - 2 * y[i] + y[i - k]) / (h * h) });
+  }
+  return out;
+}
+
+/** 平均と標準偏差。a-t の帯に使う */
+export function meanSd(v: number[]): { mean: number; sd: number } {
+  if (v.length === 0) return { mean: 0, sd: 0 };
+  const mean = v.reduce((a, b) => a + b, 0) / v.length;
+  if (v.length < 2) return { mean, sd: 0 };
+  const sd = Math.sqrt(
+    v.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (v.length - 1)
+  );
+  return { mean, sd };
+}
+
+/**
+ * a-t 図として読める Δt を選ぶ。
+ *
+ * 判断の基準はコマ数ではなく**実時間**。合成データで確かめたところ、
+ * k dt が 30ms を超えたあたりで標準偏差が 1〜2 m/s² に収まり、図として
+ * 読めるようになった。240fps なら k=8、30fps なら k=1〜2 がそこに当たる。
+ *
+ *   240fps・位置ノイズ0.5mm   k=1 SD 80.9 / k=4 SD 4.5 / k=8 SD 1.1
+ *    30fps・位置ノイズ2mm     k=1 SD  3.7 / k=2 SD 1.1
+ *
+ * 広げすぎると「その区間で加速度が一定」という前提が効いてくるので、
+ * 条件を満たす**最小**の k を返す。
+ */
+export function recommendK(dt: number, ks: number[] = [1, 2, 4, 8, 16]): number {
+  const target = 0.03;   // 実時間 30ms
+  for (const k of ks) if (k * dt >= target) return k;
+  return ks[ks.length - 1];
+}
+
+/** 記録の刻み（中央値）。Δt の目安を出すのに使う */
+export function medianStep(t: number[]): number {
+  if (t.length < 2) return 0;
+  const steps: number[] = [];
+  for (let i = 1; i < t.length; i++) steps.push(t[i] - t[i - 1]);
+  steps.sort((a, b) => a - b);
+  return steps[Math.floor(steps.length / 2)];
+}
+
+/** 矩形で選んだ範囲。null の辺は制限なし */
+export interface FitBox {
+  t0: number;
+  t1: number;
+  y0: number;
+  y1: number;
+}
+
+/** 矩形の中に入っている点だけを残す */
+export function insideBox(
+  pts: { t: number; y: number }[], box: FitBox | null
+): { t: number; y: number }[] {
+  if (!box) return pts;
+  return pts.filter(
+    p => p.t >= box.t0 && p.t <= box.t1 && p.y >= box.y0 && p.y <= box.y1
+  );
+}
