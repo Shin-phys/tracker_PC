@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   TrackedObject, ScaleCalibration, FilterSettings,
   FrameData, Rect, FpsSettings, TrackingSettings,
-  DEFAULT_TRACKING, ObjectStatus, Point, SeedHint,
+  DEFAULT_TRACKING, ObjectStatus, Point, SeedHint, HaltInfo,
 } from './types';
 import { waitForOpenCV } from './utils/opencvLoader';
 import { ObjectTracker, MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE } from './utils/tracker';
@@ -18,6 +18,7 @@ import {
   TimeRange, FULL_RANGE, inRange, normalizeRange, trackedPointAt, trackedStepAt,
 } from './utils/timeRange';
 import { recentStep } from './utils/frameCheck';
+import { truncateAfter, dropPointAt, clearSuspect } from './utils/trailEdit';
 
 import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
@@ -150,6 +151,18 @@ export const App: React.FC = () => {
   const [pauseAt, setPauseAt] = useState(0);
   /** 止めたあと、同じ再生中に何度も止めないための印 */
   const haltedRef = useRef(false);
+  /**
+   * 追跡が飛んで止めた、という事実。null なら何も起きていない。
+   * これが入っている間だけ、映像の上に「どこまで戻すか」を選ばせる案内を出す。
+   */
+  const [halt, setHalt] = useState<HaltInfo | null>(null);
+  /**
+   * この時刻まで暴れの検出を見送る。
+   *
+   * 「誤検出なので続ける」を選んだあとに同じコマで止め直さないために使う。
+   * 本物の衝突や、意図した急な加速はここで素通りさせる。
+   */
+  const suppressRef = useRef(0);
   const seekSeqRef = useRef(0);
 
   // ----- Refs -----
@@ -538,6 +551,9 @@ export const App: React.FC = () => {
             item.yM = realPt.y;
             item.lost = false;
             item.manual = true;
+            // 直した点に「飛んだ」の印を残さない。残すと軌跡の線が
+            // そこで切れたままになり、直ったことが画面に出ない。
+            delete item.suspect;
           } else {
             fd.objects[objId] = {
               xPx: center.x, yPx: center.y,
@@ -607,6 +623,8 @@ export const App: React.FC = () => {
   // -------------------------------------------------
 
   const handleResetData = useCallback(() => {
+    setHalt(null);
+    suppressRef.current = 0;
     historyDataRef.current = [];
     lastFlushRef.current = 0;
     setHistoryData([]);
@@ -672,6 +690,8 @@ export const App: React.FC = () => {
       );
     });
 
+    setHalt(null);
+    suppressRef.current = 0;
     historyDataRef.current = [];
     lastFlushRef.current = 0;
     setHistoryData([]);
@@ -705,6 +725,97 @@ export const App: React.FC = () => {
     }));
     return true;
   }, [frameTolerance]);
+
+  // -------------------------------------------------
+  // 軌跡の切り落とし
+  // -------------------------------------------------
+
+  /**
+   * keepUntil のコマまでを残し、それより後の記録を捨てる。
+   *
+   * 追跡が飛んだあとの後始末はこれが本体。1 点を正しい位置へ直すのでは
+   * 足りないのは、テンプレートが別のものに乗り移るまでに数コマの
+   * ドリフトが先行しているから。信用できる最後のコマまで戻して捨て、
+   * そこから撮り直すほうが速く、データも素直になる。
+   *
+   * ついでにトラッカーも全部捨てる。壊れたテンプレートを抱えたまま
+   * 再開すると、同じ場所でまた壊れる。枠は「残した最後のコマで物体が
+   * いた位置」へ移すので、そのまま再生を続けられる。
+   *
+   * @returns 捨てたコマ数
+   */
+  const handleTruncateAfter = useCallback((keepUntil: number): number => {
+    const tol = frameTolerance();
+    const { kept, dropped, lastTime } = truncateAfter(
+      historyDataRef.current, keepUntil, tol
+    );
+    historyDataRef.current = kept;
+    lastFlushRef.current = 0;
+    setHistoryData(kept.slice());
+    Object.values(trackersRef.current).forEach(t => t.cleanup());
+    trackersRef.current = {};
+
+    setObjects(prev => prev.map(o => {
+      const base = o.initialRoi ?? o.roi;
+      if (!base || lastTime === null) {
+        return { ...o, status: 'idle' as ObjectStatus, center: null };
+      }
+      const p = trackedPointAt(kept, o.id, lastTime, tol * 3);
+      const roi: Rect = p
+        ? {
+            x: p.x - base.width / 2,
+            y: p.y - base.height / 2,
+            width: base.width,
+            height: base.height,
+          }
+        : base;
+      return {
+        ...o,
+        status: 'idle' as ObjectStatus,
+        roi,
+        center: null,
+        ...(p
+          ? {
+              initialRoi: roi,
+              initialTime: lastTime,
+              seed: trackedStepAt(kept, o.id, lastTime, tol * 3),
+            }
+          : {}),
+      };
+    }));
+    setHalt(null);
+    return dropped;
+  }, [frameTolerance]);
+
+  /**
+   * 1 点だけ消す。グラフを見て後から外れ値に気づいたとき用。
+   * 当てはめも 2 階差分も、1 点の跳ねで台無しになる。
+   */
+  const handleDropPoint = useCallback((objId: string, t: number): boolean => {
+    const ok = dropPointAt(historyDataRef.current, objId, t, frameTolerance());
+    if (ok) flushHistory(true);
+    return ok;
+  }, [frameTolerance, flushHistory]);
+
+  /**
+   * 止めた案内を閉じる。
+   *
+   * @param accept true なら「誤検出だった」。印を外し、同じあたりでは
+   *   当分検出を見送る。見送らないと、再開した次のコマで同じ理由で
+   *   また止まり、先へ進めなくなる。
+   *   false は「印は残して自分で直す」。
+   */
+  const handleDismissHalt = useCallback((accept: boolean) => {
+    setHalt(h => {
+      if (h && accept) {
+        clearSuspect(historyDataRef.current, h.objId);
+        // 8 コマ分ほど見送る（frameTolerance は実間隔の半分）
+        suppressRef.current = h.time + frameTolerance() * 16;
+        flushHistory(true);
+      }
+      return null;
+    });
+  }, [frameTolerance, flushHistory]);
 
   // -------------------------------------------------
   // フレーム処理（VideoCanvas の requestVideoFrameCallback から呼ばれる）
@@ -846,17 +957,27 @@ export const App: React.FC = () => {
         // 飛んだのが 1 つだけなら追跡の失敗。2 つ以上が同時に飛んでいたら
         // 衝突かもしれないので止めない（運動量のやりとりは同時に起きるので、
         // 本物の衝突では両方の速度が同じコマで変わる）。
-        if (suspects.length === 1 && !haltedRef.current) {
+        // 飛んだのが 1 つだけなら追跡の失敗。2 つ以上が同時に飛んでいたら
+        // 衝突かもしれないので止めない（運動量のやりとりは同時に起きるので、
+        // 本物の衝突では両方の速度が同じコマで変わる）。
+        //
+        // 点は消さない。消すと「無かったこと」になり、誤検出だったときに
+        // 戻せなくなる。印を付けて軌跡の線をそこで切り、どこまで戻すかを
+        // 人に選ばせる。
+        if (
+          suspects.length === 1 && !haltedRef.current
+          && timestamp > suppressRef.current
+        ) {
           const sp = suspects[0];
           haltedRef.current = true;
+          const item = frameObjects[sp.id];
+          if (item) item.suspect = true;
           setPauseAt(n => n + 1);
           setIsPlaying(false);
-          setNotice(
-            `${sp.id}: ${timestamp.toFixed(3)} s で追跡が飛びました`
-            + `（1 コマ ${Math.round(sp.step)}px・直前までは ${Math.round(sp.base)}px`
-            + `${sp.atEdge ? '・探索窓の縁に張り付き' : ''}）。ここで止めました。`
-            + `点を正しい位置へ直すか、枠を取り直してください。`
-          );
+          setHalt({
+            objId: sp.id, time: timestamp,
+            step: sp.step, base: sp.base, atEdge: sp.atEdge,
+          });
         }
 
         const distances: FrameData['distances'] = {};
@@ -948,6 +1069,10 @@ export const App: React.FC = () => {
             onManualUndo={handleManualUndo}
         onSeedPoint={handleSeedPoint}
         pauseAt={pauseAt}
+        halt={halt}
+        onTruncateAfter={handleTruncateAfter}
+        onDropPoint={handleDropPoint}
+        onDismissHalt={handleDismissHalt}
             calibration={calibration}
             onUpdateCalibration={setCalibration}
             onProcessFrame={handleProcessFrame}

@@ -26,7 +26,7 @@
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
-  TrackedObject, ScaleCalibration, Rect, Point, FrameData, FpsSettings
+  TrackedObject, ScaleCalibration, Rect, Point, FrameData, FpsSettings, HaltInfo
 } from '../types';
 import { recalcScale, pixelDistance } from '../utils/calibration';
 import { applyHomography, invertHomography, Matrix3 } from '../utils/homography';
@@ -40,6 +40,7 @@ import {
 import { timeScale } from '../utils/timeScale';
 import { drawCrosshair, drawCalibPoint } from '../utils/overlay';
 import { checkTrack } from '../utils/frameCheck';
+import { pointsBefore, TrailPoint } from '../utils/trailEdit';
 import { SEED_FRAMES } from '../types';
 import {
   TimeRange, FULL_RANGE, hasRange, rangeStart, rangeEnd, rangeSpan,
@@ -50,7 +51,7 @@ import {
   Play, Pause, RotateCcw, Upload, Crosshair, ZoomIn, ZoomOut,
   Eraser, ChevronLeft, ChevronRight, Gauge, Hand, MousePointerClick, Undo2,
   Scissors, CornerDownLeft, CornerDownRight, XCircle, ListVideo, Square as StopIcon,
-  Zap, SkipBack,
+  Zap, SkipBack, Scissors as CutIcon, Check,
 } from 'lucide-react';
 
 interface VideoCanvasProps {
@@ -68,6 +69,18 @@ interface VideoCanvasProps {
   onSeedPoint: (objId: string, point: Point, fileTime: number) => string;
   /** 追跡が暴れたときの一時停止要求。増えるたびに止める */
   pauseAt: number;
+  /** 追跡が飛んで止めた、という事実。null なら何も起きていない */
+  halt: HaltInfo | null;
+  /** keepUntil のコマまでを残し、それより後を捨てる。戻り値は捨てたコマ数 */
+  onTruncateAfter: (keepUntil: number) => number;
+  /** 1 点だけ消す。グラフを見て後から外れ値に気づいたとき用 */
+  onDropPoint: (objId: string, t: number) => boolean;
+  /**
+   * 止めた案内を閉じる。
+   * accept=true は「誤検出だった」＝印を外して当分検出を見送る。
+   * false は「自分で直す」＝印は残したまま案内だけ閉じる。
+   */
+  onDismissHalt: (accept: boolean) => void;
   calibration: ScaleCalibration;
   onUpdateCalibration: (calib: ScaleCalibration) => void;
   onProcessFrame: (videoEl: HTMLVideoElement, timestamp: number, frameIndex: number) => void;
@@ -99,6 +112,11 @@ interface VideoCanvasProps {
 const MAX_TRAIL_POINTS = 2000;
 /** 校正点を掴める距離（canvas ピクセル） */
 const HANDLE_RADIUS = 14;
+/** 虫めがねの倍率と一辺（画面ピクセル） */
+const LOUPE_MAG = 3;
+const LOUPE_SIZE = 120;
+/** 「ここまでは正しい」を選ばせる候補の数 */
+const PICK_POINTS = 24;
 
 type DragMode =
   | null
@@ -129,11 +147,13 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   historyData, onResetData, onClearTrail, onFlushHistory, isPlaying, setIsPlaying,
   fpsSettings, setFpsSettings,
   isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest, pauseAt,
+  halt, onTruncateAfter, onDismissHalt, onDropPoint,
   timeRange, onChangeTimeRange,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const loupeRef = useRef<HTMLCanvasElement | null>(null);
 
   const [videoLoaded, setVideoLoaded] = useState(false);
   const [videoDimensions, setVideoDimensions] = useState({ width: 640, height: 360 });
@@ -204,6 +224,30 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   /** 手動修正モード（ON のときだけ点をドラッグして直せる） */
   const [correctMode, setCorrectMode] = useState(false);
 
+  /**
+   * 「ここまでは正しい」を選んでもらうモード。
+   * ON のあいだ、飛んだ時刻の手前の記録点が候補として並ぶ。
+   */
+  const [pickMode, setPickMode] = useState(false);
+  /** マウスが乗っている候補の時刻 */
+  const [pickHover, setPickHover] = useState<number | null>(null);
+  /** 切り落としたあとの一言 */
+  const [cutMsg, setCutMsg] = useState<string | null>(null);
+
+  /**
+   * クリックで置いた枠の中心。大きさはこのあとスライダーで決める。
+   *
+   * ドラッグで一気に引く操作は残してある（マウスなら速い）。
+   * ただ、2 点間校正で 1px が 3% に効くような画の細かさだと、
+   * 目分量のドラッグでは端が決まらない。中心だけ先に決めれば、
+   * 虫めがねで画素を見ながら置ける。
+   */
+  const [roiCenter, setRoiCenter] = useState<Point | null>(null);
+  /** 中心を決めたあとの枠の一辺 */
+  const [roiSize, setRoiSize] = useState(RECOMMENDED_ROI_SIZE);
+  /** マウスの現在位置（虫めがねの中心に使う。ドラッグ中でなくても出す） */
+  const [hoverPt, setHoverPt] = useState<Point | null>(null);
+
   const frameCounterRef = useRef(0);
   const frameIntervalsRef = useRef<number[]>([]);
   const lastMediaTimeRef = useRef<number | null>(null);
@@ -252,6 +296,8 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     setOriginMode(false);
     setCorrectMode(false);
     setManualMode(false);
+    setRoiCenter(null);
+    setPickMode(false);
     // 区間は「この動画の何秒から何秒まで」なので、別の動画では意味を持たない
     onChangeTimeRange(FULL_RANGE);
     e.target.value = '';
@@ -515,9 +561,58 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     return () => window.clearTimeout(id);
   }, [manualMsg]);
 
+  /**
+   * 「ここまでは正しい」の候補。飛んだ時刻の手前の記録点を新しい順に並べる。
+   *
+   * 時刻の数字ではなく映像の上の点として選ばせる。どこでドリフトが
+   * 始まったかは、軌跡の形を見れば分かるが、秒数の一覧からは分からない。
+   */
+  const pickPoints = useMemo<TrailPoint[]>(
+    () => (halt ? pointsBefore(historyData, halt.objId, halt.time, PICK_POINTS) : []),
+    [halt, historyData]
+  );
+
+  /** 候補のうち、その点までの移動量が中央値から外れているもの＝怪しい範囲 */
+  const pickMedianStep = useMemo(() => {
+    const steps = pickPoints.map(q => q.step).filter(v => v > 0).sort((a, b) => a - b);
+    return steps.length > 0 ? steps[Math.floor(steps.length / 2)] : 0;
+  }, [pickPoints]);
+
+  /** いちばん近い候補点（しきい値内）。pick モードの当たり判定 */
+  const nearestPick = useCallback(
+    (pt: Point): TrailPoint | null => {
+      let best: TrailPoint | null = null;
+      let bestD = HANDLE_RADIUS * 2;
+      pickPoints.forEach(q => {
+        const d = pixelDistance(pt, q.point);
+        if (d < bestD) { bestD = d; best = q; }
+      });
+      return best;
+    },
+    [pickPoints]
+  );
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!videoLoaded) return;
     const pt = getCanvasCoordinates(e);
+
+    // ---------- 「ここまでは正しい」を選ぶ ----------
+    // ほかのどのモードよりも先に見る。選び終わるまで他の操作はさせない。
+    if (pickMode) {
+      const q = nearestPick(pt);
+      if (!q) return;
+      const dropped = onTruncateAfter(q.time);
+      setPickMode(false);
+      setPickHover(null);
+      setRoiCenter(null);
+      setCutMsg(
+        dropped > 0
+          ? `${q.time.toFixed(3)} s より後の ${dropped} コマを捨てました。枠を置き直してください`
+          : `${q.time.toFixed(3)} s まで残しました（捨てるコマはありませんでした）`
+      );
+      void seekTo(q.time);
+      return;
+    }
 
     // ---------- 初速ヒント ----------
     // 始点は枠の中心で決まっているので、押した瞬間に矢印が生えて、
@@ -635,7 +730,48 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     setDragCurrent(pt);
   };
 
+  /**
+   * 中心を決めたあと、スライダーの値で枠を確定する。
+   *
+   * 枠は正方形。対象は回転するし向きも変わるので、縦横を別に決めても
+   * 追跡の精度には効かない。決めることが 1 つ減るほうが速い。
+   */
+  const confirmRoi = useCallback(() => {
+    if (!roiCenter) return;
+    const half = Math.round(roiSize / 2);
+    onUpdateRoi(
+      selectedObjId,
+      {
+        x: Math.round(roiCenter.x) - half,
+        y: Math.round(roiCenter.y) - half,
+        width: Math.round(roiSize),
+        height: Math.round(roiSize),
+      },
+      videoRef.current || undefined
+    );
+    setRoiCenter(null);
+  }, [roiCenter, roiSize, selectedObjId, onUpdateRoi]);
+
+  /**
+   * 虫めがねを出す場面か。
+   *
+   * ここで絞っているのは負荷のため。マウスを動かすたびに座標を state へ
+   * 上げると毎回再描画が走る。拡大が要るのは「点を置く・選ぶ」ときだけ。
+   */
+  const wantLoupe =
+    pickMode || !!roiCenter || seedMode || originMode
+    || isLineCalibrating || (correctMode && !isPlaying);
+
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (wantLoupe || dragMode) {
+      setHoverPt(getCanvasCoordinates(e));
+    }
+    if (pickMode) {
+      const hp = getCanvasCoordinates(e);
+      const q = nearestPick(hp);
+      setPickHover(q ? q.time : null);
+      return;
+    }
     if (!dragMode) return;
     const pt = getCanvasCoordinates(e);
     setDragCurrent(pt);
@@ -710,6 +846,12 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           },
           videoRef.current || undefined
         );
+        setRoiCenter(null);
+      } else {
+        // 引かずに押しただけ＝「中心はここ」。大きさはこのあと決める。
+        // マウスでも、対象が小さく写っているときは端まで正確に引けない。
+        // 中心だけ先に置ければ、虫めがねで画素を見ながら合わせられる。
+        setRoiCenter(dragStart);
       }
     }
 
@@ -722,11 +864,68 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     onUpdateRoi, applyLine, setIsLineCalibrating, manualObjId, onManualCorrect,
   ]);
 
+
+  /** 切り落としの一言は少し長めに出す（次にすることが書いてある） */
+  useEffect(() => {
+    if (!cutMsg) return;
+    const id = window.setTimeout(() => setCutMsg(null), 6000);
+    return () => window.clearTimeout(id);
+  }, [cutMsg]);
+
+  /**
+   * 別のモードへ移ったら、途中の中心指定は捨てる。
+   * 残したままだと、校正点を置いたつもりで枠が確定することがある。
+   */
+  useEffect(() => {
+    if (correctMode || manualMode || originMode || seedMode || isLineCalibrating) {
+      setRoiCenter(null);
+    }
+  }, [correctMode, manualMode, originMode, seedMode, isLineCalibrating]);
+
+  /** 対象を変えたら、前の対象に向けて置いた中心は意味を持たない */
+  useEffect(() => { setRoiCenter(null); }, [selectedObjId]);
+
+  /** 止めた案内が出たら、他のモードは畳む。選択肢を増やしても迷うだけ */
+  useEffect(() => {
+    if (!halt) return;
+    setIsLineCalibrating(false);
+    setOriginMode(false);
+    setSeedMode(false);
+    setManualMode(false);
+    setRoiCenter(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [halt]);
+
   // 校正線の矢印キーによる微調整
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && pickMode) {
+        setPickMode(false);
+        setPickHover(null);
+        return;
+      }
       if (e.key === 'Escape' && seedMode) {
         setSeedMode(false);
+        return;
+      }
+      // 修正モード中の Delete は「この点を消す」。
+      // 直せない点もある（対象が別のものに完全に乗り移った、物体が隠れた）。
+      // そういう点は正しい位置が無いので、消すのが唯一正しい処理になる。
+      // 当てはめも 2 階差分も、1 点の跳ねで台無しになる。
+      if (
+        (e.key === 'Delete' || e.key === 'Backspace')
+        && correctMode && !isPlaying
+      ) {
+        const tag0 = (e.target as HTMLElement)?.tagName;
+        if (tag0 === 'INPUT' || tag0 === 'SELECT' || tag0 === 'TEXTAREA') return;
+        e.preventDefault();
+        const v = videoRef.current;
+        const ok = onDropPoint(selectedObjId, v ? v.currentTime : 0);
+        setCorrectMsg(
+          ok
+            ? `${selectedObjId} のこのコマの点を消しました`
+            : 'このコマに消せる点がありません'
+        );
         return;
       }
       if (e.key === 'Escape' && originMode) {
@@ -781,7 +980,8 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [calibration, onUpdateCalibration, isLineCalibrating, setIsLineCalibrating,
-      originMode, seedMode, calibFocus, applyPlane]);
+      originMode, seedMode, calibFocus, applyPlane,
+      pickMode, correctMode, isPlaying, onDropPoint, selectedObjId]);
 
   // -------------------------------------------------
   // Canvas 描画
@@ -808,6 +1008,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   );
   /** 疑わしいコマの時刻。描画で印を付けるのに使う */
   const issueTimes = useMemo(() => new Set(trackQuality.issueTimes), [trackQuality]);
+
 
   const renderFrame = useCallback(() => {
     const video = videoRef.current;
@@ -852,7 +1053,9 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         let cur: Point[] = [];
         for (let i = 0; i < historyData.length; i++) {
           const item = historyData[i].objects[obj.id];
-          if (item && !item.lost) {
+          // 飛んだと判定した点でも線を切る。点そのものは別に描く。
+          // つないでしまうと、壊れた区間まで滑らかな運動に見える。
+          if (item && !item.lost && !item.suspect) {
             cur.push({ x: item.xPx, y: item.yPx });
           } else if (cur.length > 0) {
             segments.push(cur);
@@ -907,6 +1110,28 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             ctx.stroke();
             ctx.restore();
           }
+        }
+
+        // 飛んだと判定した点は ✕ で描く。
+        // 丸ではなく ✕ にしてあるのは、「これは軌跡の一部ではない」
+        // ことを形で示したいから。印の付いた乱れ（点線の輪）とは別物。
+        for (let i = 0; i < historyData.length; i++) {
+          const it = historyData[i].objects[obj.id];
+          if (!it || !it.suspect) continue;
+          const r = 7 * k;
+          ctx.save();
+          ctx.lineCap = 'round';
+          const cross = (color: string, w: number) => {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = w;
+            ctx.beginPath();
+            ctx.moveTo(it.xPx - r, it.yPx - r); ctx.lineTo(it.xPx + r, it.yPx + r);
+            ctx.moveTo(it.xPx + r, it.yPx - r); ctx.lineTo(it.xPx - r, it.yPx + r);
+            ctx.stroke();
+          };
+          cross('rgba(0,0,0,0.55)', 4.4 * k);
+          cross('#ef4444', 2.2 * k);
+          ctx.restore();
         }
 
         // 手動修正した点を目印として出す
@@ -1332,14 +1557,129 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
         drawCrosshair(ctx, c.x, c.y, beingDragged ? '#ffffff' : o.color, k, 9, 3, 1.6);
       });
     }
+    // ----- 「ここまでは正しい」の候補 -----
+    //
+    // 怪しい範囲（移動量が中央値から外れ始めたところ）を濃い橙で、
+    // それより前を薄く描く。どこから色が変わるかが、そのまま
+    // 「ドリフトが始まったあたり」の目印になる。
+    if (pickMode && pickPoints.length > 0) {
+      const warnFrom = (() => {
+        if (pickMedianStep <= 0) return pickPoints.length;
+        for (let i = 0; i < pickPoints.length; i++) {
+          if (pickPoints[i].step > Math.max(pickMedianStep * 2, pickMedianStep + 4)) {
+            return i;
+          }
+        }
+        return pickPoints.length;
+      })();
+
+      ctx.save();
+      pickPoints.forEach((q, i) => {
+        const warn = i >= warnFrom;
+        const on = pickHover !== null && Math.abs(q.time - pickHover) < 1e-9;
+        const r = (on ? 9 : 5.5) * k;
+        ctx.beginPath();
+        ctx.arc(q.point.x, q.point.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = warn ? 'rgba(239,68,68,0.9)' : 'rgba(245,158,11,0.85)';
+        ctx.fill();
+        ctx.strokeStyle = on ? '#ffffff' : 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = (on ? 2.6 : 1.6) * k;
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+
+    // ----- クリックで置いた枠の中心（大きさを決める前） -----
+    if (roiCenter && !pickMode) {
+      const half = roiSize / 2;
+      const obj = objects.find(o => o.id === selectedObjId);
+      const color = obj?.color ?? '#6366f1';
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2 * k;
+      ctx.setLineDash([6 * k, 4 * k]);
+      ctx.strokeRect(roiCenter.x - half, roiCenter.y - half, roiSize, roiSize);
+      ctx.setLineDash([]);
+      ctx.restore();
+      drawCrosshair(ctx, roiCenter.x, roiCenter.y, color, k, 9, 3, 1.7);
+    }
   }, [
     historyData, objects, selectedObjId, showTrail,
     dragMode, dragStart, dragCurrent, isSquareMode, calibration,
     correctMode, isPlaying, manualObjId, nearestFrameIndex, grabPoint,
     originMode, manualMode, frameTolerance, issueTimes, isLineCalibrating, calibFocus,
+    pickMode, pickPoints, pickHover, pickMedianStep, roiCenter, roiSize,
   ]);
 
   renderRef.current = renderFrame;
+
+  /** 虫めがねを出す位置（映像の表示領域の中での画面座標） */
+  const loupeAt = (() => {
+    const base = dragCurrent ?? hoverPt;
+    const show =
+      !!base && (
+        !!dragMode || pickMode || !!roiCenter || seedMode || originMode
+        || isLineCalibrating || (correctMode && !isPlaying)
+      );
+    if (!show || !base) return null;
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return null;
+    const cr = canvas.getBoundingClientRect();
+    const sr = container.getBoundingClientRect();
+    const screenX = cr.left + (base.x / canvas.width) * cr.width - sr.left;
+    // カーソルと重ならないよう、触っている側と反対の上隅に出す
+    const left = screenX > sr.width / 2 ? 10 : sr.width - LOUPE_SIZE - 10;
+    return { left, top: 10, src: base };
+  })();
+
+  /**
+   * 虫めがねを描く。
+   *
+   * 拡大元は canvas そのもの（映像＋枠＋軌跡）。映像だけを拡大すると
+   * 「いま置こうとしている点がどこか」が見えないので意味がない。
+   * imageSmoothing を切ってあるのは、画素の境目を見せたいから。
+   * どの画素を指しているかが分からないと、1px の精度では置けない。
+   */
+  const drawLoupe = useCallback(() => {
+    const lc = loupeRef.current;
+    const canvas = canvasRef.current;
+    if (!lc || !canvas || !loupeAt) return;
+    const ctx = lc.getContext('2d');
+    if (!ctx) return;
+    const r = canvas.getBoundingClientRect();
+    const dispScale = r.width > 0 ? r.width / canvas.width : 1; // 画面px / 動画px
+    const srcSize = LOUPE_SIZE / Math.max(0.001, dispScale * LOUPE_MAG);
+    const sx = loupeAt.src.x - srcSize / 2;
+    const sy = loupeAt.src.y - srcSize / 2;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    ctx.imageSmoothingEnabled = false;
+    try {
+      ctx.drawImage(canvas, sx, sy, srcSize, srcSize, 0, 0, LOUPE_SIZE, LOUPE_SIZE);
+    } catch (_) { /* 範囲外は無視 */ }
+    const c = LOUPE_SIZE / 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(c - 12, c); ctx.lineTo(c - 4, c);
+    ctx.moveTo(c + 4, c); ctx.lineTo(c + 12, c);
+    ctx.moveTo(c, c - 12); ctx.lineTo(c, c - 4);
+    ctx.moveTo(c, c + 4); ctx.lineTo(c, c + 12);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(99,102,241,0.95)';
+    ctx.beginPath();
+    ctx.arc(c, c, 2.5, 0, Math.PI * 2);
+    ctx.stroke();
+  }, [loupeAt]);
+
+  // canvas を描き終えたあとに拡大するので、1 フレーム遅らせる
+  useEffect(() => {
+    if (!loupeAt) return;
+    const id = requestAnimationFrame(drawLoupe);
+    return () => cancelAnimationFrame(id);
+  }, [drawLoupe, loupeAt, renderFrame]);
+
 
   // 停止中は状態変化のたびに1回描画
   useEffect(() => {
@@ -1738,7 +2078,8 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   // -------------------------------------------------
 
   const cursorStyle =
-    originMode || seedMode || (manualMode && !isPlaying) ? 'crosshair'
+    pickMode ? 'pointer'
+    : originMode || seedMode || (manualMode && !isPlaying) ? 'crosshair'
       : isLineCalibrating || dragMode === 'calib-new' ? 'crosshair'
       : dragMode === 'calib-p1' || dragMode === 'calib-p2' || dragMode === 'plane-corner' ? 'grabbing'
         : dragMode === 'manual' ? 'grabbing'
@@ -1822,7 +2163,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={finishDrag}
-          onMouseLeave={finishDrag}
+          onMouseLeave={() => { finishDrag(); setHoverPt(null); }}
           style={{
             width: zoom === 1 ? 'auto' : `${videoDimensions.width * zoom}px`,
             height: zoom === 1 ? 'auto' : `${videoDimensions.height * zoom}px`,
@@ -1923,7 +2264,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             borderRadius: 20, fontSize: '0.82rem', fontWeight: 700, pointerEvents: 'none',
             whiteSpace: 'nowrap', boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
           }}>
-            {correctMsg ?? '✋ 修正モード — ずれた点をドラッグして正しい位置へ'}
+            {correctMsg ?? '✋ 修正モード — 点をドラッグして直す／Delete で消す'}
           </div>
         )}
 
@@ -1934,6 +2275,147 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             borderRadius: 16, fontSize: '0.78rem', fontWeight: 700, pointerEvents: 'none', whiteSpace: 'nowrap',
           }}>
             画面外へ退出 → 追尾終了: {exitedObjects.map(o => o.id).join(', ')}
+          </div>
+        )}
+
+        {/* ---- 虫めがね ---- */}
+        {loupeAt && (
+          <div style={{
+            position: 'absolute', left: loupeAt.left, top: loupeAt.top,
+            width: LOUPE_SIZE, height: LOUPE_SIZE, borderRadius: 10, overflow: 'hidden',
+            border: '2px solid rgba(255,255,255,0.75)', background: '#000',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.6)', pointerEvents: 'none', zIndex: 6,
+          }}>
+            <canvas ref={loupeRef} width={LOUPE_SIZE} height={LOUPE_SIZE}
+              style={{ display: 'block', width: '100%', height: '100%' }} />
+          </div>
+        )}
+
+        {/* ---- 追跡が飛んで止まったときの案内 ---- */}
+        {halt && !pickMode && (
+          <div style={{
+            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+            width: 'min(560px, 92%)', background: 'rgba(15,23,42,0.96)',
+            border: '1.5px solid rgba(239,68,68,0.6)', borderRadius: 12,
+            padding: '12px 14px', boxShadow: '0 6px 24px rgba(0,0,0,0.6)', zIndex: 5,
+          }}>
+            <div style={{ fontWeight: 700, fontSize: '0.86rem', color: '#fca5a5', marginBottom: 6 }}>
+              {halt.objId}: {halt.time.toFixed(3)} s で追跡が飛びました
+            </div>
+            <div style={{
+              fontSize: '0.78rem', color: 'var(--text-secondary)', lineHeight: 1.65, marginBottom: 10,
+            }}>
+              1 コマ {Math.round(halt.step)}px・直前までは {Math.round(halt.base)}px
+              {halt.atEdge && '・相関のピークが探索窓の縁'}。
+              <br />
+              このコマには ✕ を付けて軌跡を切りました。ずれは数コマ前から
+              始まっていることが多いので、戻す位置を選んでください。
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn btn-primary btn-sm" onClick={() => setPickMode(true)}>
+                <CutIcon size={14} />
+                ここから取り直す
+              </button>
+              <button className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  onDismissHalt(false);
+                  setCorrectMode(true);
+                  void seekTo(halt.time);
+                }}>
+                <Hand size={14} />
+                この点を手で直す
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={() => onDismissHalt(true)}>
+                <Check size={14} />
+                誤検出・続ける
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ---- どこまで戻すかを選ぶ ---- */}
+        {pickMode && (
+          <div style={{
+            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+            width: 'min(560px, 92%)', background: 'rgba(15,23,42,0.96)',
+            border: '1.5px solid rgba(245,158,11,0.6)', borderRadius: 12,
+            padding: '12px 14px', boxShadow: '0 6px 24px rgba(0,0,0,0.6)', zIndex: 5,
+          }}>
+            <div style={{ fontWeight: 700, fontSize: '0.86rem', color: '#fbbf24', marginBottom: 6 }}>
+              正しい最後の点をクリック
+            </div>
+            <div style={{
+              fontSize: '0.78rem', color: 'var(--text-secondary)', lineHeight: 1.65, marginBottom: 10,
+            }}>
+              赤い点は、そこまでの移動量が普段から外れているコマです。
+              クリックした点より後の記録を捨てて、枠をその位置へ戻します。
+              {pickHover !== null && (
+                <>
+                  <br />
+                  <span className="mono" style={{ color: '#fbbf24', fontWeight: 700 }}>
+                    {pickHover.toFixed(3)} s まで残す
+                  </span>
+                </>
+              )}
+            </div>
+            <button className="btn btn-secondary btn-sm"
+              onClick={() => { setPickMode(false); setPickHover(null); }}>
+              <XCircle size={14} />
+              やめる
+            </button>
+          </div>
+        )}
+
+        {cutMsg && !halt && !pickMode && (
+          <div style={{
+            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(16,185,129,0.95)', color: '#04221a', padding: '7px 16px',
+            borderRadius: 20, fontSize: '0.8rem', fontWeight: 700, pointerEvents: 'none',
+            maxWidth: '86%', lineHeight: 1.5, boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
+          }}>
+            ✂ {cutMsg}
+          </div>
+        )}
+
+        {/* ---- 中心を置いたあと、枠の大きさを決める ---- */}
+        {roiCenter && !pickMode && !halt && (
+          <div style={{
+            position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
+            width: 'min(520px, 94%)', background: 'rgba(15,23,42,0.96)',
+            border: '1px solid var(--border-color)', borderRadius: 12,
+            padding: '10px 14px', boxShadow: '0 6px 24px rgba(0,0,0,0.6)', zIndex: 5,
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: 8,
+            }}>
+              <span>{selectedObjId} の枠の大きさ</span>
+              <span className="mono" style={{ fontWeight: 700, color: 'var(--text-primary)' }}>
+                {Math.round(roiSize)}px
+              </span>
+            </div>
+            <input
+              type="range" min={MIN_ROI_SIZE} max={240} step={1} value={roiSize}
+              onChange={e => setRoiSize(Number(e.target.value))}
+              style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+            />
+            <div style={{
+              fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: 1.6,
+              margin: '6px 0 9px',
+            }}>
+              マーカー全体が入る大きさに。内側だけだと、光の反射や回転で滑ります。
+              映像をもう一度クリックすれば中心を置き直せます。
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn-primary btn-sm" onClick={confirmRoi}>
+                <Check size={14} />
+                決定
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={() => setRoiCenter(null)}>
+                <XCircle size={14} />
+                やめる
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -1997,7 +2479,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
             disabled={!videoLoaded || !objects.find(o => o.id === selectedObjId)?.initialRoi}
             title="速い対象向け。枠を置いたコマから数コマ送って同じ対象を指すと、追跡の最初から予測が効きます">
             <Zap size={14} />
-            初速
+            2点目を指す
           </button>
 
           <button

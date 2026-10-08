@@ -70,6 +70,27 @@ export interface SeedHint {
 /** 初速ヒントで送るコマ数の既定値 */
 export const SEED_FRAMES = 4;
 
+/**
+ * 追跡が飛んだので止めた、という事実。
+ *
+ * 画面に出すのは「何が起きたか」ではなく「次に何をするか」なので、
+ * ここに入れるのは判断の材料だけに絞る。step と base を並べて見せると
+ * 「普段の 7px に対して 36px」という形で読めて、誤検出かどうかを
+ * 自分で判断できる。
+ */
+export interface HaltInfo {
+  /** 飛んだ物体 */
+  objId: string;
+  /** 飛んだコマのファイル上の時刻 [s] */
+  time: number;
+  /** そのコマの移動量 [px] */
+  step: number;
+  /** 直前までの移動量の中央値 [px] */
+  base: number;
+  /** 相関のピークが探索窓の縁に出ていたか */
+  atEdge: boolean;
+}
+
 /** 矩形領域 */
 export interface Rect {
   x: number;
@@ -100,6 +121,15 @@ export interface FrameData {
       score: number;    // マッチングスコア 0-1
       lost: boolean;
       manual?: boolean; // 手動で位置を修正したフレーム
+      /**
+       * 追跡が飛んだと判定されたコマ。
+       *
+       * 点は残す。消してしまうと「無かったこと」になり、なぜそこで
+       * 止めたのかを説明できなくなる。そのかわり軌跡の線はここで切り、
+       * 外れ値として別に描く。ひとつながりに描くと、壊れた区間まで
+       * 滑らかな運動に見えてしまう。
+       */
+      suspect?: boolean;
     };
   };
   distances: {
