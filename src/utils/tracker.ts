@@ -68,6 +68,32 @@ export const RECOMMENDED_ROI_SIZE = 20;
  */
 export const SLIDE_SHARPNESS = 0.2;
 
+/**
+ * 探索窓の大きさを「予測の外れ量」から決めるための係数。
+ *
+ * ここが効く理由。等速度予測が当たっている限り、探索窓が吸収すべきなのは
+ * **移動量ではなく、移動量の変化**だけである。自由落下の実測では
+ * 1 コマ 44px 進む場面でも、予測の外れは 1.1px しかなかった。
+ * それなのに窓を枠の 1.2 倍（枠 40px なら半径 48px）取っていたので、
+ * 必要の 40 倍の範囲を探していた。広い窓はそのぶん「似た模様」に
+ * 乗り移る機会を増やすだけで、追跡の役には立たない。
+ *
+ * 合成データでの実測（直径 18px の白シール、経路の外に同じ印が並ぶ）
+ *   半径 48px（枠 x1.2）… 乗り移り（誤差 680px）
+ *   半径 24px 以下      … 誤差 0.0px
+ * 一方、速度が急に変わる場面（衝突で +18 → -12）では 30px の窓が要る。
+ * そこで「普段は狭く、縁に当たったら 1 回だけ上限まで広げて引き直す」
+ * という形にした。これで両方成立する（衝突でも誤差 0.0px）。
+ * 平均の探索半径は 48px → 4〜8px まで下がる。
+ */
+const RESID_K = 4;
+/** 予測の外れ量に足す下駄 [px]。サブピクセルの揺らぎぶん */
+const RESID_FLOOR = 3;
+/** 探索半径の下限 [px] */
+const MIN_SEARCH_PX = 4;
+/** 予測の外れ量の移動平均の重み（新しい値の寄与） */
+const RESID_ALPHA = 0.4;
+
 /** テンプレートが追跡に足りるかの測定結果 */
 export interface TemplateProbe {
   /** 指した位置での相関 */
@@ -94,6 +120,14 @@ export interface TrackerResult {
    * （サブピクセル補間も効かないので、座標が整数になって現れる）。
    */
   atEdge: boolean;
+  /**
+   * このコマで実際に探した半径 [px]。
+   *
+   * 画面に出すために返している。探索範囲の設定は「数字をいくつにすべきか」
+   * が分からない類の設定で、実際に探している範囲が枠と一緒に見えていれば
+   * 「広すぎる」「狭すぎる」を目で判断できる。
+   */
+  searchPx: number;
 }
 
 export class ObjectTracker {
@@ -112,6 +146,13 @@ export class ObjectTracker {
 
   private state: TrackState = 'ok';
   private lostStreak = 0;
+  /**
+   * 予測位置と実際に見つかった位置のずれ [px]（移動平均）。
+   * 探索窓の大きさをここから決める。
+   */
+  private resid = 0;
+  /** 直前のコマで実際に探した半径 [px]（表示用） */
+  private lastSearchPx = 0;
   private cfg: TrackingSettings;
 
   /** 重心計算に使う局所窓の半径 */
@@ -206,6 +247,7 @@ export class ObjectTracker {
     this.hasVelocity = false;
     this.state = 'ok';
     this.lostStreak = 0;
+    this.resid = 0;
     // 重心窓は ROI の半分程度。小さすぎると背景に引っ張られる
     this.half = Math.max(4, Math.round(Math.min(w, h) * 0.45));
 
@@ -238,6 +280,9 @@ export class ObjectTracker {
     this.vx = v.x;
     this.vy = v.y;
     this.hasVelocity = true;
+    // 人が指した 2 点なので、1〜2px のずれは見ておく。
+    // 足りなければ縁に当たって引き直されるので、ここは小さめで構わない。
+    this.resid = 2;
   }
 
   // ----------------------------------------------------------
@@ -389,48 +434,46 @@ export class ObjectTracker {
     const px = this.cx + (this.hasVelocity ? this.vx : 0);
     const py = this.cy + (this.hasVelocity ? this.vy : 0);
 
-    // --- 2. 探索窓（予測位置中心） ---
-    const margin = Math.max(this.tw, this.th) * this.cfg.searchScale;
-    const sx0 = Math.floor(px - this.tw / 2 - margin);
-    const sy0 = Math.floor(py - this.th / 2 - margin);
-    const sw = Math.ceil(this.tw + margin * 2);
-    const sh = Math.ceil(this.th + margin * 2);
+    // --- 2. 探索窓 ---
+    //
+    // 上限は従来どおり「枠 × 探索範囲」。そのうえで、予測が当たっている
+    // 限りは狭く取る。窓が吸収すべきなのは移動量ではなく移動量の変化で、
+    // 実測ではその差が 40 倍あった（1 コマ 44px 進むのに外れは 1.1px）。
+    // 広い窓は「似た模様」へ乗り移る機会を増やすだけで何の役にも立たない。
+    const cap = Math.max(this.tw, this.th) * this.cfg.searchScale;
+    const tight = this.hasVelocity
+      ? Math.max(MIN_SEARCH_PX, Math.min(cap, this.resid * RESID_K + RESID_FLOOR))
+      : cap;   // 速度がまだ無いコマは、どれだけ動くか分からないので上限で探す
 
-    const region = src.getRegion(sx0, sy0, sw, sh);
-    if (!region || region.width < this.tw || region.height < this.th) {
-      // 探索窓がテンプレートより小さい＝画面端に張り付いている
-      return this.markExited();
+    // 狭い窓で縁に当たったら、1 回だけ上限まで広げて引き直す。
+    // 衝突のように速度が急に変わるコマは、これでないと拾えない
+    // （合成データ: +18 → -12 の反転には 30px の窓が要る）。
+    let found: {
+      ncx: number; ncy: number; score: number; atEdge: boolean;
+    } | null = null;
+    let exited = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const margin = attempt === 0 ? tight : cap;
+      this.lastSearchPx = margin;
+      const r = this.matchOnce(src, px, py, margin);
+      if (r === 'exited') { exited = true; break; }
+      if (!r) break;
+      found = r;
+      // 縁に当たっていない、もしくは既に上限で探している＝引き直す余地なし
+      if (!r.atEdge || margin >= cap) break;
     }
+    if (exited) return this.markExited();
+    if (!found) return this.result('lost', 0);
 
-    let searchMat: any = null;
-    let resultMat: any = null;
+    // 予測がどれだけ外れたかを覚える。次のコマの窓の大きさになる
+    this.resid = (1 - RESID_ALPHA) * this.resid
+      + RESID_ALPHA * Math.hypot(found.ncx - px, found.ncy - py);
+
+    const score = found.score;
+    const atEdge = found.atEdge;
     try {
-      searchMat = new this.cv.Mat(region.height, region.width, this.cv.CV_8UC1);
-      searchMat.data.set(region.gray);
-      resultMat = new this.cv.Mat();
-      this.cv.matchTemplate(searchMat, this.templateMat, resultMat, this.cv.TM_CCOEFF_NORMED);
-
-      const mm = this.cv.minMaxLoc(resultMat);
-      const score: number = mm.maxVal;
-      const loc = mm.maxLoc;
-
-      // ピークが相関マップの縁に出ていないか。
-      // 出ていれば、本当の最適解は探索窓の外にある可能性が高い。
-      const atEdge =
-        loc.x <= 0 || loc.y <= 0 ||
-        loc.x >= resultMat.cols - 1 || loc.y >= resultMat.rows - 1;
-
-      // --- 3. 相関ピークのサブピクセル補間（2次曲面フィット） ---
-      let dx = 0;
-      let dy = 0;
-      if (this.cfg.subpixel) {
-        const sub = this.quadraticPeak(resultMat, loc.x, loc.y);
-        dx = sub.dx;
-        dy = sub.dy;
-      }
-
-      let ncx = region.x0 + loc.x + dx + this.tw / 2;
-      let ncy = region.y0 + loc.y + dy + this.th / 2;
+      let ncx = found.ncx;
+      let ncy = found.ncy;
 
       // --- 4. 白さ重心によるサブピクセル精密化（任意） ---
       if (this.cfg.centroidRefine) {
@@ -454,6 +497,7 @@ export class ObjectTracker {
         this.hasVelocity = false;
         this.vx = 0;
         this.vy = 0;
+        this.resid = 0;
         // 画面端付近でロストした場合は「画面外へ出た」と判断する
         if (this.cfg.stopOnExit && this.lostStreak >= 2 && this.isNearEdge(this.cx, this.cy, src)) {
           return this.markExited();
@@ -477,6 +521,66 @@ export class ObjectTracker {
     } catch (err) {
       console.error(`[Tracker:${this.objId}] 更新失敗:`, err);
       return this.result('lost', 0);
+    }
+  }
+
+  /**
+   * 1 回だけテンプレート照合する。
+   *
+   * @param px,py 予測位置（窓の中心）
+   * @param margin 探索半径 [px]
+   * @returns サブピクセル補間まで済んだ中心。窓が取れなければ 'exited'
+   */
+  private matchOnce(
+    src: FrameSource, px: number, py: number, margin: number
+  ): { ncx: number; ncy: number; score: number; atEdge: boolean } | 'exited' | null {
+    const sx0 = Math.floor(px - this.tw / 2 - margin);
+    const sy0 = Math.floor(py - this.th / 2 - margin);
+    const sw = Math.ceil(this.tw + margin * 2);
+    const sh = Math.ceil(this.th + margin * 2);
+
+    const region = src.getRegion(sx0, sy0, sw, sh);
+    if (!region || region.width < this.tw || region.height < this.th) {
+      // 探索窓がテンプレートより小さい＝画面端に張り付いている
+      return 'exited';
+    }
+
+    let searchMat: any = null;
+    let resultMat: any = null;
+    try {
+      searchMat = new this.cv.Mat(region.height, region.width, this.cv.CV_8UC1);
+      searchMat.data.set(region.gray);
+      resultMat = new this.cv.Mat();
+      this.cv.matchTemplate(searchMat, this.templateMat, resultMat, this.cv.TM_CCOEFF_NORMED);
+
+      const mm = this.cv.minMaxLoc(resultMat);
+      const score: number = mm.maxVal;
+      const loc = mm.maxLoc;
+
+      // ピークが相関マップの縁に出ていないか。
+      // 出ていれば、本当の最適解は探索窓の外にある可能性が高い。
+      const atEdge =
+        loc.x <= 0 || loc.y <= 0 ||
+        loc.x >= resultMat.cols - 1 || loc.y >= resultMat.rows - 1;
+
+      // 相関ピークのサブピクセル補間（2次曲面フィット）
+      let dx = 0;
+      let dy = 0;
+      if (this.cfg.subpixel) {
+        const sub = this.quadraticPeak(resultMat, loc.x, loc.y);
+        dx = sub.dx;
+        dy = sub.dy;
+      }
+
+      return {
+        ncx: region.x0 + loc.x + dx + this.tw / 2,
+        ncy: region.y0 + loc.y + dy + this.th / 2,
+        score,
+        atEdge,
+      };
+    } catch (err) {
+      console.error(`[Tracker:${this.objId}] 照合失敗:`, err);
+      return null;
     } finally {
       if (searchMat) try { searchMat.delete(); } catch (_) { /* noop */ }
       if (resultMat) try { resultMat.delete(); } catch (_) { /* noop */ }
@@ -653,7 +757,9 @@ export class ObjectTracker {
 
   // ----------------------------------------------------------
 
-  private result(state: TrackState, score: number, atEdge = false): TrackerResult {
+  private result(
+    state: TrackState, score: number, atEdge = false
+  ): TrackerResult {
     this.state = state;
     return {
       objId: this.objId,
@@ -666,6 +772,7 @@ export class ObjectTracker {
       center: { x: this.cx, y: this.cy },
       state,
       score,
+      searchPx: this.lastSearchPx,
       atEdge,
     };
   }

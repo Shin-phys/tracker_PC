@@ -39,6 +39,11 @@ export interface TrackedObject {
   initialTime: number | null;
   /** 初速ヒント。無ければ null（遅い対象では要らない） */
   seed: SeedHint | null;
+  /**
+   * 直前のコマで実際に探した半径 [px]。表示用で、記録には残らない。
+   * 探索範囲の設定は数字だけでは決められないので、映像の上に出す。
+   */
+  searchPx?: number;
 }
 
 /**

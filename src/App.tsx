@@ -1094,6 +1094,7 @@ export const App: React.FC = () => {
         const suspects: { id: string; step: number; base: number; atEdge: boolean }[] = [];
         const updates: {
           id: string; status: ObjectStatus; roi?: Rect; center?: Point;
+          searchPx?: number;
         }[] = [];
 
         activeObjs.forEach(obj => {
@@ -1189,6 +1190,7 @@ export const App: React.FC = () => {
               status: res.state === 'lost' ? 'lost' : 'tracking',
               roi: res.roi,
               center: res.center,
+              searchPx: res.searchPx,
             });
           } catch (objErr) {
             console.error(`[App] Tracker error on ${obj.id}:`, objErr);
@@ -1249,6 +1251,7 @@ export const App: React.FC = () => {
                 status: u.status,
                 ...(u.roi ? { roi: u.roi } : {}),
                 ...(u.center ? { center: u.center } : {}),
+                ...(u.searchPx !== undefined ? { searchPx: u.searchPx } : {}),
               } as TrackedObject;
             });
             return changed ? next : prev;
