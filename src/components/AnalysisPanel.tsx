@@ -16,7 +16,7 @@
 
 import React, { useMemo, useState } from 'react';
 import {
-  TrackedObject, FrameData, FpsSettings, ScaleCalibration, UNIT_TO_M,
+  TrackedObject, FrameData, FpsSettings, ScaleCalibration,
 } from '../types';
 import {
   fitSeries, rawSeries, pickQuantity, accelerationOf, velocityOf,
@@ -25,6 +25,7 @@ import {
 import { ticksFor, fmtTick } from '../utils/plotScale';
 import { timeScale } from '../utils/timeScale';
 import { checkTrack } from '../utils/frameCheck';
+import { outputUnit } from '../utils/calibration';
 import { TimeRange } from '../utils/timeRange';
 import { Sigma, Activity } from 'lucide-react';
 
@@ -190,7 +191,16 @@ export const AnalysisPanel: React.FC<Props> = ({
    */
   const [dropIssues, setDropIssues] = useState(true);
 
-  const unit = calibration.unit;
+  /**
+   * 表示に使う単位。
+   *
+   * 記録されている座標は**常にメートル**（未校正なら px）。
+   * calibration.unit は「基準の長さを何で入力したか」でしかなく、
+   * これを表示に使うと、中身が m なのに cm と書く、という嘘になる。
+   * 実際そうなっていて、加速度が 100 倍ずれて読める状態だった。
+   */
+  const unit = outputUnit(calibration);
+  const calibrated = unit === 'm';
   const scale = timeScale(fpsSettings);
   const target = active.find(o => o.id === objId) ?? active[0];
 
@@ -231,9 +241,12 @@ export const AnalysisPanel: React.FC<Props> = ({
   const aUnit = `${unit}/s²`;
   const qNote = QUANTITIES.find(q => q.key === quantity)?.note ?? '';
 
-  /** 加速度を m/s² に直して g と比べる（cm で校正していても効くように） */
-  const gRatio = accel
-    ? Math.abs(accel.value) * UNIT_TO_M[unit] / G_STANDARD
+  /**
+   * g の何倍か。値はすでに m/s² なので、そのまま割る。
+   * 校正していなければ px/s² なので比べない。
+   */
+  const gRatio = accel && calibrated
+    ? Math.abs(accel.value) / G_STANDARD
     : null;
 
   const chip = (on: boolean) => `chip ${on ? 'is-active' : ''}`;
@@ -302,6 +315,13 @@ export const AnalysisPanel: React.FC<Props> = ({
             onClick={() => setDropIssues(v => !v)}>
             {dropIssues ? '入れる' : '外す'}
           </button>
+        </div>
+      )}
+
+      {!calibrated && (
+        <div className="notice notice-info" style={{ margin: 0 }}>
+          まだ校正していないので、数値は <b>px</b> のままです。
+          スケールを決めると m・m/s・m/s² になります。
         </div>
       )}
 

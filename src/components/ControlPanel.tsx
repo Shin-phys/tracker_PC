@@ -615,7 +615,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
             <div>
               射影変換で校正済み — 画面内の位置に応じて縮尺が自動補正されます。
               <div style={{ color: 'var(--text-secondary)', fontSize: '0.76rem' }}>
-                原点は四角形の{calibration.yUp ? '左下' : '左上'}の角、単位は {calibration.unit}。
+                原点は四角形の{calibration.yUp ? '左下' : '左上'}の角。記録と出力は m。
               </div>
             </div>
           ) : (
@@ -627,6 +627,9 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
               </div>
               <div style={{ color: 'var(--text-secondary)' }}>
                 1 px = <span className="mono">{fmt(1 / calibration.pxPerUnit, 4)} {calibration.unit}</span>
+                <br />
+                基準の長さは入力しやすい単位で構いません。
+                <b>記録と出力は常に m・m/s・m/s² にそろえます</b>（教科書の式にそのまま入ります）。
               </div>
             </>
           )}
