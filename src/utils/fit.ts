@@ -250,7 +250,16 @@ export function rawSeries(
   data: { timestamp: number; objects: { [id: string]: { xM: number; yM: number; lost: boolean; suspect?: boolean } } }[],
   objId: string,
   scale: number,
-  range?: { start: number | null; end: number | null }
+  range?: { start: number | null; end: number | null },
+  /**
+   * 外す時刻（ファイル上の時刻）。コマの点検で「飛んでいる」と出た
+   * コマを当てはめから外すのに使う。
+   *
+   * 黙って外さない。外した数は画面に出して、戻せるようにしてある。
+   * 都合の悪い点を黙って消すのは、数値を出す道具としていちばんやって
+   * はいけないことなので。
+   */
+  excludeTimes?: Set<number>
 ): RawSeries {
   const t: number[] = [];
   const x: number[] = [];
@@ -258,8 +267,9 @@ export function rawSeries(
   for (let i = 0; i < data.length; i++) {
     const it = data[i].objects[objId];
     // 見失った点と「飛んだ」印の付いた点は当てはめに入れない。
-    // 1 点の跳ねで傾きが動くので、ここだけは黙って外す。
+    // 1 点の跳ねで傾きが動く。
     if (!it || it.lost || it.suspect) continue;
+    if (excludeTimes && excludeTimes.has(data[i].timestamp)) continue;
     const tt = data[i].timestamp * scale;
     if (range) {
       if (range.start !== null && tt < range.start * scale - 1e-9) continue;

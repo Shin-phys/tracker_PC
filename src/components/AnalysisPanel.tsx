@@ -1,25 +1,32 @@
 // src/components/AnalysisPanel.tsx
 // ============================================================
-// 解析 — 当てはめて数値を出すためのパネル。
+// 解析 — 当てはめて数値を出すパネル。
 //
-// グラフ概形の確認（DataPanel）と分けてあるのは、やることが違うから。
-// あちらは「計測が使い物になるか」を見る場所で、平滑化も効く。
-// こちらは「数値をいくつとして報告するか」を決める場所なので、
+// 作り直しの理由
+//   最初の版は、残差と R² と RMSE から出していた。これは「当てはめが
+//   済んだあとに疑うための道具」であって、**何をしたのかを示すものでは
+//   ない**。まず見せるべきなのは「データの上に線が引けている」という絵と、
+//   「加速度はいくつか」という答えの 2 つ。診断はそのあとに畳んで置く。
+//
+// 変わらない芯は 3 つ。
 //   ・当てはめるのは**生データ**（平滑化すると不確かさが過小評価される）
 //   ・傾きには**標準誤差を必ず添える**
-//   ・残差を見せる（構造が残っていたらモデルが違う）
-// の 3 つを外さない。
+//   ・残差を見られるようにする（構造が残っていたらモデルが違う）
 // ============================================================
 
 import React, { useMemo, useState } from 'react';
-import { TrackedObject, FrameData, FpsSettings, ScaleCalibration } from '../types';
+import {
+  TrackedObject, FrameData, FpsSettings, ScaleCalibration, UNIT_TO_M,
+} from '../types';
 import {
   fitSeries, rawSeries, pickQuantity, accelerationOf, velocityOf,
-  secondDiffStats, FitModel, FitQuantity, G_STANDARD,
+  secondDiffStats, FitModel, FitQuantity, FitResult, G_STANDARD,
 } from '../utils/fit';
+import { ticksFor, fmtTick } from '../utils/plotScale';
 import { timeScale } from '../utils/timeScale';
+import { checkTrack } from '../utils/frameCheck';
 import { TimeRange } from '../utils/timeRange';
-import { TrendingUp, Sigma, Activity } from 'lucide-react';
+import { Sigma, Activity } from 'lucide-react';
 
 interface Props {
   objects: TrackedObject[];
@@ -31,12 +38,17 @@ interface Props {
   onSeek?: (t: number) => void;
 }
 
-const QUANTITIES: { key: FitQuantity; label: string }[] = [
-  { key: 'x', label: 'x' },
-  { key: 'y', label: 'y' },
-  { key: 'vx', label: 'vx' },
-  { key: 'vy', label: 'vy' },
+const QUANTITIES: { key: FitQuantity; label: string; note: string }[] = [
+  { key: 'x', label: 'x-t', note: '横の位置' },
+  { key: 'y', label: 'y-t', note: '縦の位置' },
+  { key: 'vx', label: 'vx-t', note: '横の速度' },
+  { key: 'vy', label: 'vy-t', note: '縦の速度' },
 ];
+
+/** 点の色。対象の色は赤のこともあるので、外れ点の色とぶつけない */
+const DOT = '#60a5fa';
+const OUTLIER = '#f59e0b';
+const LINE = '#ffffff';
 
 const fmt = (v: number, d = 4): string => {
   if (!isFinite(v)) return '---';
@@ -45,57 +57,117 @@ const fmt = (v: number, d = 4): string => {
   return v.toFixed(d);
 };
 
-/** 残差グラフ。構造（曲がり・うねり）が見えたらモデルが違う */
+// ------------------------------------------------------------
+// データと当てはめた線
+// ------------------------------------------------------------
+//
+// これが無かったのが、前の版でいちばん伝わらなかった原因。
+// 残差だけ見せても「何に何を当てはめたのか」が分からない。
+
+const FitPlot: React.FC<{
+  pts: { t: number; y: number }[];
+  fit: FitResult;
+  yLabel: string;
+}> = ({ pts, fit, yLabel }) => {
+  const W = 560;
+  const H = 240;
+  const pad = { l: 60, r: 12, t: 12, b: 28 };
+  const tMin = Math.min(...pts.map(p => p.t));
+  const tMax = Math.max(...pts.map(p => p.t));
+  const ysAll = [...pts.map(p => p.y), fit.evalAt(tMin), fit.evalAt(tMax)];
+  let yMin = Math.min(...ysAll);
+  let yMax = Math.max(...ysAll);
+  const span = yMax - yMin || 1;
+  yMin -= span * 0.08;
+  yMax += span * 0.08;
+
+  const px = (t: number) =>
+    pad.l + ((t - tMin) / Math.max(1e-12, tMax - tMin)) * (W - pad.l - pad.r);
+  const py = (y: number) =>
+    H - pad.b - ((y - yMin) / Math.max(1e-12, yMax - yMin)) * (H - pad.t - pad.b);
+
+  const xTicks = ticksFor(tMin, tMax, 6);
+  const yTicks = ticksFor(yMin, yMax, 5);
+  const xStep = xTicks.length > 1 ? xTicks[1] - xTicks[0] : 1;
+  const yStep = yTicks.length > 1 ? yTicks[1] - yTicks[0] : 1;
+
+  const curve: string = Array.from({ length: 81 }, (_, i) => {
+    const t = tMin + ((tMax - tMin) * i) / 80;
+    return `${i === 0 ? 'M' : 'L'}${px(t).toFixed(1)},${py(fit.evalAt(t)).toFixed(1)}`;
+  }).join(' ');
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
+      {yTicks.map(v => (
+        <g key={`y${v}`}>
+          <line x1={pad.l} y1={py(v)} x2={W - pad.r} y2={py(v)}
+            stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
+          <text x={pad.l - 6} y={py(v) + 3.5} fill="var(--text-muted)" fontSize={10}
+            textAnchor="end">{fmtTick(v, yStep)}</text>
+        </g>
+      ))}
+      {xTicks.map(v => (
+        <g key={`x${v}`}>
+          <line x1={px(v)} y1={pad.t} x2={px(v)} y2={H - pad.b}
+            stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
+          <text x={px(v)} y={H - pad.b + 15} fill="var(--text-muted)" fontSize={10}
+            textAnchor="middle">{fmtTick(v, xStep)}</text>
+        </g>
+      ))}
+      {pts.map((p, i) => (
+        <circle key={i} cx={px(p.t)} cy={py(p.y)} r={2.8} fill={DOT} opacity={0.9} />
+      ))}
+      <path d={curve} fill="none" stroke={LINE} strokeWidth={1.8} opacity={0.95} />
+      <text x={pad.l} y={H - 3} fill="var(--text-muted)" fontSize={10}>t (s)</text>
+      <text x={3} y={pad.t + 2} fill="var(--text-muted)" fontSize={10}>{yLabel}</text>
+    </svg>
+  );
+};
+
+/** 残差。構造（曲がり・うねり）が見えたらモデルが違う */
 const ResidualPlot: React.FC<{
   residuals: { t: number; r: number }[];
   rmse: number;
-  color: string;
-  onSeek?: (t: number) => void;
   scale: number;
-}> = ({ residuals, rmse, color, onSeek, scale }) => {
+  unit: string;
+  onSeek?: (t: number) => void;
+}> = ({ residuals, rmse, scale, unit, onSeek }) => {
   const W = 560;
-  const H = 120;
-  const pad = { l: 46, r: 8, t: 10, b: 20 };
-  if (residuals.length < 2) return null;
+  const H = 140;
+  const pad = { l: 60, r: 12, t: 10, b: 22 };
   const ts = residuals.map(p => p.t);
-  const rs = residuals.map(p => p.r);
   const tMin = Math.min(...ts);
   const tMax = Math.max(...ts);
-  const rAbs = Math.max(...rs.map(Math.abs), 1e-12);
+  const rAbs = Math.max(...residuals.map(p => Math.abs(p.r)), 1e-12);
   const px = (t: number) =>
     pad.l + ((t - tMin) / Math.max(1e-12, tMax - tMin)) * (W - pad.l - pad.r);
   const py = (r: number) =>
     pad.t + (0.5 - (r / (rAbs * 1.15)) * 0.5) * (H - pad.t - pad.b);
+  const yTicks = ticksFor(-rAbs, rAbs, 3);
+  const yStep = yTicks.length > 1 ? yTicks[1] - yTicks[0] : 1;
 
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
-      {/* ±RMSE の帯。点の 2/3 ほどがこの中に入るのが素直な姿 */}
-      <rect
-        x={pad.l} y={py(rmse)} width={W - pad.l - pad.r}
-        height={Math.max(1, py(-rmse) - py(rmse))}
-        fill="rgba(99,102,241,0.12)"
-      />
+      <rect x={pad.l} y={py(rmse)} width={W - pad.l - pad.r}
+        height={Math.max(1, py(-rmse) - py(rmse))} fill="rgba(96,165,250,0.16)" />
+      {yTicks.map(v => (
+        <text key={v} x={pad.l - 6} y={py(v) + 3.5} fill="var(--text-muted)"
+          fontSize={10} textAnchor="end">{fmtTick(v, yStep)}</text>
+      ))}
       <line x1={pad.l} y1={py(0)} x2={W - pad.r} y2={py(0)}
         stroke="rgba(255,255,255,0.35)" strokeWidth={1} />
-      <text x={4} y={py(0) + 4} fill="var(--text-muted)" fontSize={10}>0</text>
-      <text x={4} y={py(rAbs) + 10} fill="var(--text-muted)" fontSize={10}>
-        {rAbs.toExponential(1)}
-      </text>
-      {residuals.map((p, i) => (
-        <circle
-          key={i} cx={px(p.t)} cy={py(p.r)} r={2.6}
-          fill={Math.abs(p.r) > 2.5 * rmse ? '#ef4444' : color}
-          style={{ cursor: onSeek ? 'pointer' : 'default' }}
-          onClick={() => onSeek?.(scale > 0 ? p.t / scale : p.t)}
-        />
-      ))}
-      <text x={pad.l} y={H - 6} fill="var(--text-muted)" fontSize={10}>
-        {tMin.toFixed(3)} s
-      </text>
-      <text x={W - pad.r} y={H - 6} fill="var(--text-muted)" fontSize={10}
-        textAnchor="end">
-        {tMax.toFixed(3)} s
-      </text>
+      {residuals.map((p, i) => {
+        const out = Math.abs(p.r) > 2.5 * rmse;
+        return (
+          <circle key={i} cx={px(p.t)} cy={py(p.r)} r={out ? 4.2 : 2.8}
+            fill={out ? OUTLIER : DOT}
+            style={{ cursor: onSeek ? 'pointer' : 'default' }}
+            onClick={() => onSeek?.(scale > 0 ? p.t / scale : p.t)} />
+        );
+      })}
+      <text x={3} y={pad.t + 2} fill="var(--text-muted)" fontSize={10}>{unit}</text>
+      <text x={W - pad.r} y={H - 4} fill="var(--text-muted)" fontSize={10}
+        textAnchor="end">帯 = ±RMSE</text>
     </svg>
   );
 };
@@ -107,24 +179,44 @@ export const AnalysisPanel: React.FC<Props> = ({
   const [objId, setObjId] = useState<string>(active[0]?.id ?? 'Obj1');
   const [quantity, setQuantity] = useState<FitQuantity>('vy');
   const [model, setModel] = useState<FitModel>('linear');
+  const [showResid, setShowResid] = useState(false);
+  const [showWhy, setShowWhy] = useState(false);
+  /**
+   * コマの点検で「飛んでいる」と出たコマを外すか。既定は外す。
+   *
+   * 残差が RMSE の 3 倍まで伸びる原因はたいていこれで、入れたままだと
+   * 傾きも標準誤差も壊れる。ただし黙っては外さない。外した数を出して、
+   * 戻せるようにしてある。
+   */
+  const [dropIssues, setDropIssues] = useState(true);
 
   const unit = calibration.unit;
   const scale = timeScale(fpsSettings);
   const target = active.find(o => o.id === objId) ?? active[0];
 
-  const series = useMemo(
-    () => rawSeries(historyData, target?.id ?? objId, scale, timeRange),
-    [historyData, target?.id, objId, scale, timeRange]
+  /** コマの点検。飛んでいるコマの時刻を当てはめから外すのに使う */
+  const quality = useMemo(
+    () => checkTrack(
+      historyData, target?.id ?? objId,
+      target?.initialRoi?.width ?? target?.roi?.width ?? 0
+    ),
+    [historyData, target?.id, target?.initialRoi?.width, target?.roi?.width, objId]
+  );
+  const excludeTimes = useMemo(
+    () => (dropIssues ? new Set(quality.issueTimes) : undefined),
+    [dropIssues, quality]
   );
 
+  const series = useMemo(
+    () => rawSeries(historyData, target?.id ?? objId, scale, timeRange, excludeTimes),
+    [historyData, target?.id, objId, scale, timeRange, excludeTimes]
+  );
   const values = pickQuantity(series, quantity);
   const pts = useMemo(
     () => series.t.map((t, i) => ({ t, y: values[i] })),
     [series.t, values]
   );
   const fit = useMemo(() => fitSeries(pts, model), [pts, model]);
-
-  // 2 階差分は位置に対してだけ意味がある
   const sdStats = useMemo(() => {
     if (quantity === 'vx' || quantity === 'vy') return [];
     return secondDiffStats(series.t, values);
@@ -133,9 +225,19 @@ export const AnalysisPanel: React.FC<Props> = ({
   const accel = fit ? accelerationOf(quantity, fit) : null;
   const vel = fit ? velocityOf(quantity, fit) : null;
   const isVel = quantity === 'vx' || quantity === 'vy';
+  /** その量そのものの単位（cm や cm/s） */
   const qUnit = isVel ? `${unit}/s` : unit;
+  /** 加速度の単位は、何に当てはめたかに関係なく常にこれ */
+  const aUnit = `${unit}/s²`;
+  const qNote = QUANTITIES.find(q => q.key === quantity)?.note ?? '';
+
+  /** 加速度を m/s² に直して g と比べる（cm で校正していても効くように） */
+  const gRatio = accel
+    ? Math.abs(accel.value) * UNIT_TO_M[unit] / G_STANDARD
+    : null;
 
   const chip = (on: boolean) => `chip ${on ? 'is-active' : ''}`;
+  const sub = { fontSize: '0.78rem', color: 'var(--text-secondary)', lineHeight: 1.6 };
 
   return (
     <div className="glass-panel" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -162,11 +264,9 @@ export const AnalysisPanel: React.FC<Props> = ({
             <button key={q.key} className={chip(q.key === quantity)}
               onClick={() => {
                 setQuantity(q.key);
-                // 位置なら放物線、速度なら直線が既定。
-                // 加速度を読みたい場面がほとんどなので、そこへ寄せる。
                 setModel(q.key === 'vx' || q.key === 'vy' ? 'linear' : 'quadratic');
               }}>
-              {q.label}-t
+              {q.label}
             </button>
           ))}
         </div>
@@ -180,6 +280,31 @@ export const AnalysisPanel: React.FC<Props> = ({
         </div>
       </div>
 
+      <div style={sub}>
+        {target?.id ?? ''} の<b>{qNote}</b>（{quantity}）の時間変化に、
+        <b>{model === 'linear' ? '直線' : '放物線'}</b>を当てはめます。
+        {fit && <> 使った点は <b>{fit.n} 点</b>、
+          {pts[0].t.toFixed(2)} 〜 {pts[pts.length - 1].t.toFixed(2)} s の範囲です。</>}
+      </div>
+
+      {quality.issueTimes.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 10, padding: '7px 11px', borderRadius: 8,
+          background: 'rgba(245,158,11,0.10)',
+          border: '1px solid rgba(245,158,11,0.3)',
+        }}>
+          <span style={{ fontSize: '0.78rem', color: '#fbbf24' }}>
+            位置の飛んだコマ {quality.issueTimes.length} 個
+            {dropIssues ? 'を外しています' : 'も入れています'}
+          </span>
+          <button className="btn btn-secondary btn-sm"
+            onClick={() => setDropIssues(v => !v)}>
+            {dropIssues ? '入れる' : '外す'}
+          </button>
+        </div>
+      )}
+
       {!fit && (
         <div className="notice notice-info" style={{ margin: 0 }}>
           当てはめに足りる点がありません（{pts.length} 点）。
@@ -189,7 +314,16 @@ export const AnalysisPanel: React.FC<Props> = ({
 
       {fit && (
         <>
-          {/* ---- 物理量として読んだ値 ---- */}
+          {/* ---- 絵で見せる ---- */}
+          <div>
+            <FitPlot pts={pts} fit={fit} yLabel={`${quantity} (${qUnit})`} />
+            <div style={{ ...sub, fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+              青い点が実測、白い線が当てはめた{model === 'linear' ? '直線' : '放物線'}です。
+              点が線から系統的に離れていたら、モデルか追跡のどちらかが合っていません。
+            </div>
+          </div>
+
+          {/* ---- 答え ---- */}
           {(accel || vel) && (
             <div style={{
               padding: '12px 14px', borderRadius: 10,
@@ -199,29 +333,28 @@ export const AnalysisPanel: React.FC<Props> = ({
               {accel && (
                 <>
                   <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                    加速度{isVel ? '（速度の傾き）' : '（t² の係数 × 2）'}
+                    加速度 ＝ {isVel ? '速度の傾き' : 't² の係数 × 2'}
                   </div>
                   <div className="mono" style={{
                     fontSize: '1.3rem', fontWeight: 700, color: 'var(--text-primary)',
                     lineHeight: 1.3,
                   }}>
-                    {fmt(accel.value, 3)} ± {fmt(accel.err, 3)} {qUnit}
-                    {isVel ? '' : '²'}
-                    {isVel ? '/s' : ''}
+                    {fmt(accel.value, 3)} ± {fmt(accel.err, 3)} {aUnit}
                   </div>
-                  {unit === 'm' && Math.abs(accel.value) > G_STANDARD * 0.3
-                    && Math.abs(accel.value) < G_STANDARD * 3 && (
+                  {gRatio !== null && gRatio > 0.3 && gRatio < 3 && (
                     <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: 4 }}>
-                      g の {(Math.abs(accel.value) / G_STANDARD).toFixed(3)} 倍
-                      （標準重力 {G_STANDARD} m/s²）
+                      g の <b>{gRatio.toFixed(3)} 倍</b>（標準重力 {G_STANDARD} m/s²）
                     </div>
                   )}
+                  <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 6 }}>
+                    ± は傾きの標準誤差です。点が多いほど、区間が広いほど小さくなります。
+                  </div>
                 </>
               )}
               {vel && (
                 <>
                   <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                    速度（位置の傾き）
+                    速度 ＝ 位置の傾き
                   </div>
                   <div className="mono" style={{
                     fontSize: '1.3rem', fontWeight: 700, color: 'var(--text-primary)',
@@ -233,49 +366,49 @@ export const AnalysisPanel: React.FC<Props> = ({
             </div>
           )}
 
-          {/* ---- 当てはめの中身 ---- */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-            {[
-              { k: '点の数', v: `${fit.n}` },
-              { k: 'R²', v: fit.r2.toFixed(6) },
-              { k: 'RMSE', v: `${fmt(fit.rmse, 5)} ${qUnit}` },
-              {
-                k: '式',
-                v: fit.model === 'linear'
-                  ? `${fmt(fit.coef[1], 3)} t ${fit.coef[0] >= 0 ? '+' : '−'} ${fmt(Math.abs(fit.coef[0]), 3)}`
-                  : `${fmt(fit.coef[2], 3)} t² …`,
-              },
-            ].map(s => (
-              <div key={s.k} style={{
-                padding: '8px 10px', borderRadius: 8,
-                background: 'rgba(255,255,255,0.03)',
-                border: '1px solid var(--border-color)',
-              }}>
-                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{s.k}</div>
-                <div className="mono" style={{ fontSize: '0.82rem', fontWeight: 600 }}>{s.v}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* ---- 残差 ---- */}
+          {/* ---- 当てはまり具合 ---- */}
           <div>
             <div style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: 4,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              gap: 10, marginBottom: 6,
             }}>
-              <TrendingUp size={14} />
-              残差（実測 − 当てはめ）
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                当てはまり具合
+              </span>
+              <button className="btn btn-secondary btn-sm"
+                onClick={() => setShowResid(v => !v)}>
+                {showResid ? '残差を閉じる' : '残差を見る'}
+              </button>
             </div>
-            <ResidualPlot
-              residuals={fit.residuals} rmse={fit.rmse}
-              color={target?.color ?? '#6366f1'} onSeek={onSeek} scale={scale}
-            />
-            <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-              ばらついているだけなら、そのモデルで足りています。
-              <b>弓なりに曲がっていたらモデルが違います</b>
-              （直線を当てはめた速度が曲がる＝加速度が一定でない）。
-              赤い点は RMSE の 2.5 倍を超えた点で、クリックするとその時刻へ飛びます。
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {[
+                { k: 'R²（1 に近いほど線に乗っている）', v: fit.r2.toFixed(6) },
+                { k: 'RMSE（線からの平均的なずれ）', v: `${fmt(fit.rmse, 4)} ${qUnit}` },
+              ].map(s => (
+                <div key={s.k} style={{
+                  padding: '8px 10px', borderRadius: 8,
+                  background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid var(--border-color)',
+                }}>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{s.k}</div>
+                  <div className="mono" style={{ fontSize: '0.86rem', fontWeight: 600 }}>{s.v}</div>
+                </div>
+              ))}
             </div>
+            {showResid && (
+              <div style={{ marginTop: 10 }}>
+                <ResidualPlot
+                  residuals={fit.residuals} rmse={fit.rmse}
+                  scale={scale} unit={qUnit} onSeek={onSeek}
+                />
+                <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                  残差＝実測 − 当てはめ。<b>でたらめにばらついていれば、その
+                  モデルで足りています。</b>弓なりに曲がっていたらモデルが違います
+                  （直線を当てはめた速度が曲がる＝加速度が一定でない）。
+                  橙の点は RMSE の 2.5 倍を超えた点で、クリックするとその時刻へ飛びます。
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ---- Δt の選び方 ---- */}
@@ -312,25 +445,35 @@ export const AnalysisPanel: React.FC<Props> = ({
               </table>
               <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: 1.6, marginTop: 6 }}>
                 分母が (Δt)² なので、<b>Δt を 2 倍にするとばらつきは 1/4</b> になります。
-                一方で Δt を広げると「その区間で加速度が一定」という前提が効いてくるので、
-                等加速度でない運動では平均が偏ります。
-                <b>平均が動かなくなって、ばらつきが十分小さい最小の Δt</b> を選ぶのが定石です。
+                一方で広げると「その区間で加速度が一定」という前提が効いてきます。
+                <b>平均が動かなくなって、ばらつきが十分小さい最小の Δt</b> を選んでください。
               </div>
             </div>
           )}
 
-          {/* ---- 原則 ---- */}
-          <div style={{
-            fontSize: '0.74rem', color: 'var(--text-muted)', lineHeight: 1.65,
-            paddingTop: 10, borderTop: '1px solid var(--border-color)',
-          }}>
-            当てはめているのは<b>平滑化していない生データ</b>です。平滑化したデータに
-            当てはめると、傾きはほとんど変わらないのに R² と標準誤差だけが良くなります
-            （平滑化は隣の点と相関を作るので「独立な n 点」という前提が崩れ、
-            不確かさが実際より小さく出ます）。
-            <br />
-            誤差の効き方も覚えておいてください。<b>スケールの誤差は加速度に比例、
-            時間軸の誤差は 2 乗で効きます</b>。撮影 fps を 2 倍間違えると加速度は 4 倍ずれます。
+          {/* ---- 前提 ---- */}
+          <div style={{ paddingTop: 10, borderTop: '1px solid var(--border-color)' }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => setShowWhy(v => !v)}>
+              {showWhy ? 'この数値の前提を閉じる' : 'この数値の前提'}
+            </button>
+            {showWhy && (
+              <div style={{
+                fontSize: '0.74rem', color: 'var(--text-muted)',
+                lineHeight: 1.65, marginTop: 8,
+              }}>
+                当てはめているのは<b>平滑化していない生データ</b>です。平滑化した
+                データに当てはめると、傾きはほとんど変わらないのに R² と標準誤差
+                だけが良くなります（隣の点と相関ができて「独立な n 点」という
+                前提が崩れるため）。見やすさのための平滑化と、数値を出すための
+                当てはめは別の作業です。
+                <br /><br />
+                <b>スケールの誤差は加速度に比例、時間軸の誤差は 2 乗で効きます。</b>
+                撮影 fps を 2 倍間違えると加速度は 4 倍ずれます。
+                <br /><br />
+                見失った点と、追跡が飛んだと判定された点（✕ の付いた点）は
+                当てはめから除いています。
+              </div>
+            )}
           </div>
         </>
       )}
