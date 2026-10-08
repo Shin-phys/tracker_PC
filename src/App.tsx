@@ -1315,6 +1315,8 @@ export const App: React.FC = () => {
             onManualUndo={handleManualUndo}
         onSeedPoint={handleSeedPoint}
         pauseAt={pauseAt}
+        searchScale={tracking.searchScale}
+        onChangeSearchScale={(v: number) => setTracking(t => ({ ...t, searchScale: v }))}
         halt={halt}
         onTruncateAfter={handleTruncateAfter}
         onDropPoint={handleDropPoint}

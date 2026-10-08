@@ -887,8 +887,9 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                 fmt: (v: number) => v.toFixed(2),
               },
               {
-                key: 'searchScale' as const, label: '探索範囲', min: 0.6, max: 4, step: 0.2,
-                hint: '速く動く対象では大きめに。大きいほど処理は重くなる',
+                key: 'searchScale' as const, label: '探索範囲（上限）', min: 0.4, max: 4, step: 0.2,
+                hint: '普段の窓は動きの変化から自動で決まる。ここはその上限。'
+                  + '目印を使っているなら小さいほうが有利（広い窓は似た模様に乗り移る機会を増やすだけ）',
                 fmt: (v: number) => `${v.toFixed(1)}×`,
               },
             ]).map(s => (

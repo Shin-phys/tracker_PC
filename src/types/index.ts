@@ -223,7 +223,15 @@ export interface TrackingSettings {
   centroidLevel: number;
   /** ロスト判定のマッチングスコア閾値 (0-1) */
   lostThreshold: number;
-  /** 探索窓の大きさ（ROIサイズの倍率） */
+  /**
+   * 探索窓の**上限**（枠の大きさに対する倍率）。
+   *
+   * 普段の探索半径は「予測の外れ量 × 4 + 3px」で自動に決まり、ここは
+   * その上限にしかならない。等速度予測が当たっている限り、窓が吸収すべき
+   * なのは移動量ではなく移動量の変化なので、普段は 4〜8px で足りる。
+   * 上限が効くのは、速度がまだ無い最初の 1 コマと、縁に当たって
+   * 引き直すコマだけ。
+   */
   searchScale: number;
   /** 画面端から何px以内に来たら「画面外」と判定するか */
   exitMargin: number;
@@ -293,7 +301,10 @@ export const DEFAULT_TRACKING: TrackingSettings = {
   markerMode: 'white',
   centroidLevel: 0.5,
   lostThreshold: 0.45,
-  searchScale: 1.2,
+  // 上限の設定。普段の窓は「予測の外れ量」から自動で決まるので、
+  // ここは「急な変化が来たときどこまで広げてよいか」を意味する。
+  // 1.0（枠の大きさと同じ半径）で、実測では衝突の反転も拾えている。
+  searchScale: 1.0,
   exitMargin: 2,
   stopOnExit: true,
 };

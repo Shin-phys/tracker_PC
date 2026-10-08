@@ -42,6 +42,7 @@ import { timeScale } from '../utils/timeScale';
 import { drawCrosshair, drawCalibPoint } from '../utils/overlay';
 import { checkTrack } from '../utils/frameCheck';
 import { pointsBefore, TrailPoint } from '../utils/trailEdit';
+import { narrowerSearchScale, slowerRate, rateLabel } from '../utils/advice';
 import { SEED_FRAMES } from '../types';
 import {
   TimeRange, FULL_RANGE, hasRange, rangeStart, rangeEnd, rangeSpan,
@@ -76,6 +77,9 @@ interface VideoCanvasProps {
   ) => SeedResult;
   /** 追跡が暴れたときの一時停止要求。増えるたびに止める */
   pauseAt: number;
+  /** 探索窓の上限（枠に対する倍率）。「次に試すこと」を出すのに使う */
+  searchScale: number;
+  onChangeSearchScale: (v: number) => void;
   /** 追跡が飛んで止めた、という事実。null なら何も起きていない */
   halt: HaltInfo | null;
   /** keepUntil のコマまでを残し、それより後を捨てる。戻り値は捨てたコマ数 */
@@ -164,6 +168,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   fpsSettings, setFpsSettings,
   isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest, pauseAt,
   halt, onTruncateAfter, onDismissHalt, onDropPoint, onBridgePoint, onBridgeFinish,
+  searchScale, onChangeSearchScale,
   timeRange, onChangeTimeRange,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -959,6 +964,37 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     void seekTo(o.initialTime + 1 / Math.max(1, fpsSettings.value));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridgeMode]);
+
+  /**
+   * 次に試すこと。
+   *
+   * 目印（丸シールなど）を使っているなら、追跡が飛ぶ原因はたいてい
+   * 「窓が広くて似た模様に乗り移った」か「コマを取りこぼして 1 コマの
+   * 移動量が倍になった」のどちらか。どちらも設定で直せるので、
+   * 文章で勧めるのではなく、そのまま押せるボタンにして出す。
+   * すでに下限なら出さない（できないことを勧めない）。
+   */
+  const nextScale = narrowerSearchScale(searchScale);
+  const nextRate = slowerRate(playbackRate, PLAYBACK_RATES.map(r => r.v));
+
+  const retryTips = (
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+      {nextScale !== null && (
+        <button className="btn btn-secondary btn-sm"
+          onClick={() => onChangeSearchScale(nextScale)}
+          title="目印を使っているなら窓は狭いほうが有利です。広い窓は似た模様に乗り移る機会を増やすだけで、追跡の役には立ちません">
+          探索範囲 {searchScale.toFixed(1)} → {nextScale.toFixed(1)}
+        </button>
+      )}
+      {nextRate !== null && (
+        <button className="btn btn-secondary btn-sm"
+          onClick={() => setPlaybackRate(nextRate)}
+          title="コマを取りこぼすと、記録の上では 1 コマの移動量が倍になり、探索窓を超えます">
+          再生速度 {rateLabel(playbackRate)} → {rateLabel(nextRate)}
+        </button>
+      )}
+    </div>
+  );
 
   /** 橋渡しを終える */
   const finishBridge = useCallback(() => {
@@ -2259,6 +2295,10 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
               : 'default';
 
   const lostObjects = objects.filter(o => o.active && o.status === 'lost');
+  /** いま見ているコマが解析区間の中か（区間が無ければ常に中） */
+  const inTrimRange = !hasRange(timeRange)
+    || (currentTime >= rangeStart(timeRange) - 1e-6
+      && currentTime <= rangeEnd(timeRange, duration) + 1e-6);
   const exitedObjects = objects.filter(o => o.active && o.status === 'exited');
 
   // -------------------------------------------------
@@ -2464,6 +2504,32 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           </div>
         )}
 
+        {/* ---- 区間の途中で見失ったとき ---- */}
+        {/*
+            区間の外でのロストは「もう写っていない」だけなので放っておく。
+            区間の中でのロストは記録の穴になるので、次に試すことまで出す。
+        */}
+        {lostObjects.length > 0 && !isPlaying && !halt && inTrimRange && (
+          <div style={{
+            position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+            width: 'min(560px, 92%)', background: 'rgba(15,23,42,0.96)',
+            border: '1.5px solid rgba(239,68,68,0.55)', borderRadius: 12,
+            padding: '11px 14px', boxShadow: '0 6px 24px rgba(0,0,0,0.6)', zIndex: 5,
+          }}>
+            <div style={{ fontWeight: 700, fontSize: '0.84rem', color: '#fca5a5' }}>
+              区間の途中で見失いました: {lostObjects.map(o => o.id).join(', ')}
+            </div>
+            <div style={{
+              fontSize: '0.76rem', color: 'var(--text-secondary)',
+              lineHeight: 1.6, marginTop: 6,
+            }}>
+              目印（丸シールなど）を使っているなら、次を試してください。
+              それでも駄目なら枠を取り直すか、そのコマだけ手で打ってください。
+            </div>
+            {retryTips}
+          </div>
+        )}
+
         {exitedObjects.length > 0 && (
           <div style={{
             position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
@@ -2526,6 +2592,17 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
                 誤検出・続ける
               </button>
             </div>
+            {(nextScale !== null || nextRate !== null) && (
+              <>
+                <div style={{
+                  fontSize: '0.74rem', color: 'var(--text-muted)',
+                  lineHeight: 1.55, marginTop: 10,
+                }}>
+                  目印（丸シールなど）を使っているなら、次を試すと再発しにくくなります。
+                </div>
+                {retryTips}
+              </>
+            )}
           </div>
         )}
 
