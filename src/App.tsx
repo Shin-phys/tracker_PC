@@ -18,7 +18,7 @@ import {
   TimeRange, FULL_RANGE, inRange, normalizeRange, trackedPointAt, trackedStepAt,
 } from './utils/timeRange';
 import { recentStep } from './utils/frameCheck';
-import { truncateAfter, dropPointAt, clearSuspect } from './utils/trailEdit';
+import { truncateAfter, dropPointAt, clearSuspect, pointsBefore } from './utils/trailEdit';
 
 import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
@@ -272,6 +272,12 @@ export const App: React.FC = () => {
   const handleUpdateRoi = useCallback(
     (objId: string, roi: Rect, videoEl?: HTMLVideoElement) => {
       let center: Point = { x: roi.x + roi.width / 2, y: roi.y + roi.height / 2 };
+      // 「同じコマか」の許容差。frameTolerance() はこの時点ではまだ
+      // 宣言されていないので、ref だけから出す（古い fps を掴まない）。
+      const recDt = historyDataRef.current.length > 1
+        ? medianDt(historyDataRef.current.map(f => f.timestamp))
+        : 0;
+      const sameFrameTol = (recDt > 0 ? recDt : 1 / 30) * 0.5;
 
       // 小さすぎる枠は誤マッチの原因になるので、ここで止めて理由を伝える
       if (roi.width < MIN_ROI_SIZE || roi.height < MIN_ROI_SIZE) {
@@ -322,8 +328,14 @@ export const App: React.FC = () => {
                 // 「やり直し」はここへ戻す（roi は追跡中に上書きされるため）。
                 initialRoi: roi,
                 initialTime: videoEl ? videoEl.currentTime : null,
-                // 枠を置き直したら、前の初速ヒントは別の位置を指しているので捨てる
-                seed: null,
+                // 初速ヒントは、同じコマで置き直すだけなら生きている。
+                // 「滑るので枠を広げる」のときに測った初速まで捨ててしまうと、
+                // せっかく人が指した 2 点が無駄になる。別のコマへ移ったときだけ捨てる。
+                seed:
+                  o.seed && videoEl
+                    && Math.abs(o.seed.time - videoEl.currentTime) <= sameFrameTol
+                    ? o.seed
+                    : null,
               }
             : o
         )
@@ -522,6 +534,190 @@ export const App: React.FC = () => {
       return { msg: '' };
     },
     [fpsSettings.value, getFrameSource]
+  );
+
+  // -------------------------------------------------
+  // 橋渡し — 跳ねたコマを手で指して繋ぐ
+  // -------------------------------------------------
+  //
+  // 切り落としたあと、同じコマをもう一度自動で追わせても同じ結果になる。
+  // 壊れた原因（そのコマの画と、そのコマの動きの大きさ）はどちらも
+  // 変わらないからだ。難しいコマは自動に任せず、人が 2〜3 コマだけ指して
+  // 渡してしまい、その先から自動に戻す。
+  //
+  // これで 3 つ同時に片付く。
+  //   1. 捨てたコマが「本来の位置」で埋まる。データに穴が開かない
+  //   2. 最後の 2 点から 1 コマあたりの移動量が出る＝再開の初速になる
+  //   3. テンプレートを「難しい場面の先」で作り直せる。衝突やブレの
+  //      瞬間を自動で越えさせる必要がなくなる
+
+  /**
+   * 橋渡しの 1 点。
+   *
+   * その物体のトラッカーがまだ無ければ、この位置で作る。切り落としで
+   * 全部捨ててあるので、各物体の「最初に指したコマ」がちょうどそこになる。
+   * 枠が滑らないかの測定は「このコマのテンプレートを数コマ先で探す」
+   * という形でしか成立しないので、土台がここで要る。
+   *
+   * @returns そのコマの対象を全部指し終えたか。
+   *   呼び出し側はここでコマを進める。1 つの物体だけ埋めてコマを進めると、
+   *   もう一方の物体にだけ穴が開いた記録になり、2 物体間の距離も
+   *   「同じコマの組」も崩れる。
+   */
+  const handleBridgePoint = useCallback(
+    (
+      objId: string, point: Point, fileTime: number, videoEl?: HTMLVideoElement
+    ): boolean => {
+      const real = toReal(
+        calibrationRef.current, point, frameSourceRef.current?.height || 0
+      );
+      const edit = placeManualPoint(
+        historyDataRef.current, objId, fileTime, point, real,
+        frameTolerance(), Math.round(fileTime * Math.max(1, fpsSettings.value))
+      );
+      manualUndoRef.current.push(edit);
+      flushHistory(true);
+
+      const obj = objectsRef.current.find(o => o.id === objId);
+      const base = obj?.initialRoi ?? obj?.roi;
+      if (!trackersRef.current[objId] && base && cvRef.current && cvReady && videoEl) {
+        const half = { w: base.width / 2, h: base.height / 2 };
+        const roi: Rect = {
+          x: Math.round(point.x - half.w), y: Math.round(point.y - half.h),
+          width: Math.round(base.width), height: Math.round(base.height),
+        };
+        try {
+          const src = getFrameSource();
+          if (src.capture(videoEl)) {
+            const t = new ObjectTracker(cvRef.current, objId, trackingRef.current);
+            // ここへ来るのはトラッカーが無いときだけなので、片付けは要らない
+            if (t.init(src, roi)) trackersRef.current[objId] = t;
+          }
+        } catch (err) {
+          console.error(`[App] 橋渡しの起点でのトラッカー生成に失敗 (${objId}):`, err);
+        }
+      }
+
+      setObjects(prev => prev.map(o =>
+        o.id === objId
+          ? { ...o, center: point, status: 'tracking' as ObjectStatus }
+          : o
+      ));
+
+      const order = objectsRef.current.filter(o => o.active).map(o => o.id);
+      return isFrameComplete(
+        historyDataRef.current, order, fileTime, frameTolerance()
+      );
+    },
+    [cvReady, getFrameSource, flushHistory, frameTolerance, fpsSettings.value]
+  );
+
+  /**
+   * 橋渡しを終えて自動に戻す。
+   *
+   * 指してもらった最後の 2 点から初速を出し、最後の点でテンプレートを
+   * 作り直す。そのうえで「この枠はこの対象を見つけられるのか」を実測する。
+   * 測定は 1 点目のコマのテンプレートを最後の点で探す形で行う（1 コマでは
+   * 測れない。同じコマだとセンサーノイズが模様として効いてしまう）。
+   */
+  const handleBridgeFinish = useCallback(
+    (videoEl?: HTMLVideoElement): SeedResult => {
+      const fps = Math.max(1, fpsSettings.value);
+      const active = objectsRef.current.filter(o => o.active);
+      let captured = false;
+      let out: SeedResult = { msg: '' };
+      const next = new Map<string, { roi: Rect; seed: SeedHint }>();
+
+      if (cvRef.current && cvReady && videoEl) {
+        try {
+          captured = getFrameSource().capture(videoEl);
+        } catch (err) {
+          console.error('[App] 橋渡しの終点でフレームを取れませんでした:', err);
+        }
+      }
+      const src = captured ? getFrameSource() : null;
+
+      active.forEach(obj => {
+        const pts = pointsBefore(historyDataRef.current, obj.id, Infinity, 2);
+        if (pts.length < 2) return;
+        const prev = pts[0];
+        const last = pts[1];
+        const frames = Math.max(1, Math.round((last.time - prev.time) * fps));
+        const perFrame = {
+          x: (last.point.x - prev.point.x) / frames,
+          y: (last.point.y - prev.point.y) / frames,
+        };
+        const base = obj.initialRoi ?? obj.roi;
+        if (!base) return;
+        const roi: Rect = {
+          x: Math.round(last.point.x - base.width / 2),
+          y: Math.round(last.point.y - base.height / 2),
+          width: Math.round(base.width),
+          height: Math.round(base.height),
+        };
+        next.set(obj.id, { roi, seed: { point: last.point, time: last.time, perFrame } });
+
+        if (!src || !cvRef.current) return;
+        try {
+          // ---- 作り直す前に、今のテンプレートで測る ----
+          // 1 コマでは測れないので、「最初に指したコマのテンプレート」を
+          // 「最後に指した位置」で探す。どちらの位置も人が教えてくれている。
+          const old = trackersRef.current[obj.id];
+          if (old && !out.msg) {
+            const pr = old.probe(src, last.point);
+            if (pr && pr.sharpness < SLIDE_SHARPNESS) {
+              const sug = old.suggestSize(src, last.point);
+              out = sug
+                ? {
+                    msg: `${obj.id}: この枠では滑ります。枠の中が一様で、ずらしても`
+                      + `同じくらい一致してしまいます`
+                      + `（ピークの鋭さ ${pr.sharpness.toFixed(2)}）。`
+                      + `枠 ${sug.size}px なら対象の輪郭が入り、`
+                      + `${sug.sharpness.toFixed(2)} まで上がります。`,
+                    betterSize: sug.size,
+                  }
+                : {
+                    msg: `${obj.id}: この枠では滑ります。枠の中にも周りにも、`
+                      + `コマが変わっても形の変わらないものがありません`
+                      + `（ピークの鋭さ ${pr.sharpness.toFixed(2)}）。`
+                      + `マーカーを貼るか、模様のある部分が入るように囲んでください。`,
+                  };
+            }
+          }
+          // ---- 最後の点でテンプレートを作り直す ----
+          // 作り直す場所が「難しい場面の先」になるのが肝。衝突やブレの
+          // 瞬間を自動で越えさせる必要がなくなる。
+          const t = new ObjectTracker(cvRef.current, obj.id, trackingRef.current);
+          if (t.init(src, roi)) {
+            t.setSeedVelocity(perFrame);
+            trackersRef.current[obj.id]?.cleanup();
+            trackersRef.current[obj.id] = t;
+          }
+        } catch (err) {
+          console.error(`[App] 橋渡しの終点でのトラッカー生成に失敗 (${obj.id}):`, err);
+        }
+      });
+
+      if (next.size === 0) {
+        return { msg: '2 コマ以上指してから自動に戻してください' };
+      }
+
+      setObjects(prev => prev.map(o => {
+        const n = next.get(o.id);
+        if (!n) return o;
+        return {
+          ...o,
+          roi: n.roi,
+          center: n.seed.point,
+          status: 'idle' as ObjectStatus,
+          initialRoi: n.roi,
+          initialTime: n.seed.time,
+          seed: n.seed,
+        };
+      }));
+      return out;
+    },
+    [cvReady, getFrameSource, fpsSettings.value]
   );
 
   // -------------------------------------------------
@@ -1119,6 +1315,8 @@ export const App: React.FC = () => {
         halt={halt}
         onTruncateAfter={handleTruncateAfter}
         onDropPoint={handleDropPoint}
+        onBridgePoint={handleBridgePoint}
+        onBridgeFinish={handleBridgeFinish}
         onDismissHalt={handleDismissHalt}
             calibration={calibration}
             onUpdateCalibration={setCalibration}

@@ -83,6 +83,15 @@ interface VideoCanvasProps {
   /** 1 点だけ消す。グラフを見て後から外れ値に気づいたとき用 */
   onDropPoint: (objId: string, t: number) => boolean;
   /**
+   * 橋渡しの 1 点。トラッカーが無ければその位置で作る。
+   * 戻り値はそのコマの対象を全部指し終えたか（呼び出し側がコマを進める）。
+   */
+  onBridgePoint: (
+    objId: string, point: Point, fileTime: number, videoEl?: HTMLVideoElement
+  ) => boolean;
+  /** 橋渡しを終えて自動に戻す。初速とテンプレートを作り直し、滑るかを測る */
+  onBridgeFinish: (videoEl?: HTMLVideoElement) => SeedResult;
+  /**
    * 止めた案内を閉じる。
    * accept=true は「誤検出だった」＝印を外して当分検出を見送る。
    * false は「自分で直す」＝印は残したまま案内だけ閉じる。
@@ -154,7 +163,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   historyData, onResetData, onClearTrail, onFlushHistory, isPlaying, setIsPlaying,
   fpsSettings, setFpsSettings,
   isLineCalibrating, setIsLineCalibrating, onVideoSize, onVideoDuration, seekRequest, pauseAt,
-  halt, onTruncateAfter, onDismissHalt, onDropPoint,
+  halt, onTruncateAfter, onDismissHalt, onDropPoint, onBridgePoint, onBridgeFinish,
   timeRange, onChangeTimeRange,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -260,8 +269,15 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const [roiSize, setRoiSize] = useState(RECOMMENDED_ROI_SIZE);
   /** マウスの現在位置（虫めがねの中心に使う。ドラッグ中でなくても出す） */
   const [hoverPt, setHoverPt] = useState<Point | null>(null);
-  /** 枠を置いたら続けて 2 点目へ進む、という待ち状態 */
-  const [pendingSeed, setPendingSeed] = useState(false);
+  /**
+   * 橋渡し中か、と指した点の数。
+   *
+   * 跳ねて捨てたコマを人が指して埋める作業。枠を置き直す代わりにこれをやる。
+   * 枠の位置は記録から分かっているので置き直しても新しい情報は無く、
+   * 足りないのは「跳ねたコマで対象はどこに居たのか」だけ。
+   */
+  const [bridgeMode, setBridgeMode] = useState(false);
+  const [bridgeCount, setBridgeCount] = useState(0);
 
   const frameCounterRef = useRef(0);
   const frameIntervalsRef = useRef<number[]>([]);
@@ -632,31 +648,6 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     [pickPoints]
   );
 
-  /**
-   * 切ったあと、枠を置いたら続けて 2 点目を指してもらうための印。
-   *
-   * なぜ続けるのか。枠を置き直しただけでは、同じ場所でまた壊れる。
-   * 壊れた理由は「そのコマのテンプレートと、そのコマの動きの大きさ」で
-   * 決まっていて、枠を引き直してもどちらも変わらないことが多い。
-   * 2 点目を指してもらえば、(1) 最初のコマから予測が効き、
-   * (2) その枠が本当にその対象を見つけられるかを実測できる。
-   * 止まった直後は、この 2 つがどちらも要る場面そのもの。
-   */
-  const chainSeedRef = useRef(false);
-
-  /**
-   * 枠が確定したときに呼ぶ。切った直後なら 2 点目へ続ける。
-   *
-   * ここで直接 startSeed を呼べないのは、枠の確定が App 側の state を
-   * 経由するため。このレンダーの objects にはまだ新しい initialTime が
-   * 入っていないので、送る先のコマを間違える。印だけ立てて、
-   * 反映されてから進む。
-   */
-  const afterRoiPlaced = useCallback(() => {
-    if (!chainSeedRef.current) return;
-    chainSeedRef.current = false;
-    setPendingSeed(true);
-  }, []);
 
   /** 選んだ点より後の記録を捨てる */
   const cutAt = useCallback((q: TrailPoint) => {
@@ -664,13 +655,14 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     setPickMode(false);
     setPickIdx(null);
     setRoiCenter(null);
-    chainSeedRef.current = true;
     setCutMsg(
       dropped > 0
-        ? `${q.time.toFixed(3)} s より後の ${dropped} コマを捨てました。`
-          + `枠を置き直すと、続けて 2 点目を聞きます`
+        ? `${q.time.toFixed(3)} s より後の ${dropped} コマを捨てました`
         : `${q.time.toFixed(3)} s まで残しました（捨てるコマはありませんでした）`
     );
+    // 枠を置き直させるのではなく、跳ねたコマを人に指してもらう
+    setBridgeCount(0);
+    setBridgeMode(true);
   }, [onTruncateAfter]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -693,6 +685,23 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       setDragMode('seed');
       setDragStart(pt);
       setDragCurrent(pt);
+      return;
+    }
+
+    // ---------- 橋渡し ----------
+    // 跳ねて捨てたコマを、人が指して埋めていく。1 クリックで 1 コマ進む。
+    if (bridgeMode && !isPlaying) {
+      // 指す相手は手動記録と同じ順番で決める。1 つだけ埋めてコマを進めると、
+      // もう一方の物体にだけ穴が開いた記録になる。
+      const objId = manualPick ?? manualTarget.objId ?? selectedObjId;
+      const complete = onBridgePoint(
+        objId, pt, frameTimeRef.current, videoRef.current || undefined
+      );
+      setManualPick(null);
+      if (complete) {
+        setBridgeCount(c => c + 1);
+        void stepFrame(1);
+      }
       return;
     }
 
@@ -822,18 +831,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       videoRef.current || undefined
     );
     setRoiCenter(null);
-    afterRoiPlaced();
-  }, [roiCenter, roiSize, selectedObjId, onUpdateRoi, afterRoiPlaced]);
-
-  // 枠が App 側へ反映されたら 2 点目へ進む
-  useEffect(() => {
-    if (!pendingSeed) return;
-    const o = objects.find(x => x.id === selectedObjId);
-    if (!o || !o.initialRoi || o.initialTime === null) return;
-    setPendingSeed(false);
-    void startSeed();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingSeed, objects, selectedObjId]);
+  }, [roiCenter, roiSize, selectedObjId, onUpdateRoi]);
 
   /**
    * 虫めがねを出す場面か。
@@ -927,7 +925,6 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
           videoRef.current || undefined
         );
         setRoiCenter(null);
-        afterRoiPlaced();
       } else {
         // 引かずに押しただけ＝「中心はここ」。大きさはこのあと決める。
         // マウスでも、対象が小さく写っているときは端まで正確に引けない。
@@ -943,9 +940,33 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   }, [
     dragMode, dragStart, dragCurrent, isSquareMode, selectedObjId,
     onUpdateRoi, applyLine, setIsLineCalibrating, manualObjId, onManualCorrect,
-    afterRoiPlaced,
   ]);
 
+
+  /**
+   * 橋渡しに入ったら、残した最後のコマの次へ送る。
+   * そこが「捨てた最初のコマ」。埋めるべき最初の 1 コマ。
+   */
+  useEffect(() => {
+    if (!bridgeMode) { setBridgeCount(0); return; }
+    const o = objects.find(x => x.id === selectedObjId);
+    if (!o || o.initialTime === null) return;
+    setIsLineCalibrating(false);
+    setOriginMode(false);
+    setSeedMode(false);
+    setManualMode(false);
+    setCorrectMode(false);
+    void seekTo(o.initialTime + 1 / Math.max(1, fpsSettings.value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridgeMode]);
+
+  /** 橋渡しを終える */
+  const finishBridge = useCallback(() => {
+    const r = onBridgeFinish(videoRef.current || undefined);
+    setSeedMsg(r.msg ? r : null);
+    setBridgeCount(0);
+    setBridgeMode(false);
+  }, [onBridgeFinish]);
 
   // 候補を選ぶモードに入ったら、まずアプリ側の答えを置く
   useEffect(() => {
@@ -2213,6 +2234,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
 
   const cursorStyle =
     pickMode ? 'pointer'
+    : bridgeMode && !isPlaying ? 'crosshair'
     : originMode || seedMode || (manualMode && !isPlaying) ? 'crosshair'
       : isLineCalibrating || dragMode === 'calib-new' ? 'crosshair'
       : dragMode === 'calib-p1' || dragMode === 'calib-p2' || dragMode === 'plane-corner' ? 'grabbing'
@@ -2487,6 +2509,57 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
               <button className="btn btn-secondary btn-sm" onClick={() => onDismissHalt(true)}>
                 <Check size={14} />
                 誤検出・続ける
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ---- 橋渡し ---- */}
+        {/*
+            跳ねて捨てたコマを、人が指して埋める。これが「枠を置き直す」の
+            代わりに要る作業。枠の位置は記録から分かっているので置き直しても
+            新しい情報は無く、足りないのは「跳ねたコマで対象はどこに居たか」。
+            指してもらえば、(1) 捨てたコマが本来の位置で埋まり、
+            (2) 最後の 2 点から再開の初速が出て、
+            (3) 難しい場面の先でテンプレートを作り直せる。
+        */}
+        {bridgeMode && (
+          <div style={{
+            position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
+            width: 'min(620px, 94%)', background: 'rgba(15,23,42,0.94)',
+            border: '1px solid rgba(99,102,241,0.55)', borderRadius: 12,
+            padding: '9px 12px', boxShadow: '0 4px 20px rgba(0,0,0,0.6)', zIndex: 5,
+          }}>
+            <div style={{
+              fontSize: '0.74rem', color: 'var(--text-secondary)',
+              lineHeight: 1.5, marginBottom: 7,
+            }}>
+              捨てたコマを埋めます。
+              <b style={{ color: 'var(--text-primary)' }}>
+                {manualPick ?? manualTarget.objId ?? selectedObjId} の中心
+              </b>
+              をクリック。そのコマの対象が揃うと 1 コマ進みます。
+              2〜3 コマで「自動に戻す」。
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span className="mono" style={{
+                fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-primary)',
+              }}>
+                {bridgeCount} 点
+              </span>
+              <span className="mono" style={{
+                fontSize: '0.78rem', color: 'var(--text-muted)', flex: 1,
+              }}>
+                {currentTime.toFixed(3)} s
+              </span>
+              <button className="btn btn-primary btn-sm"
+                disabled={bridgeCount < 2} onClick={finishBridge}>
+                <Play size={14} />
+                自動に戻す
+              </button>
+              <button className="btn btn-secondary btn-sm"
+                onClick={() => { setBridgeCount(0); setBridgeMode(false); }}>
+                <XCircle size={14} />
               </button>
             </div>
           </div>
