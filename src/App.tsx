@@ -19,6 +19,7 @@ import {
 } from './utils/timeRange';
 import { recentStep } from './utils/frameCheck';
 import { truncateAfter, dropPointAt, clearSuspect, pointsBefore } from './utils/trailEdit';
+import { originOf, sizeOf, makeCheckpoint } from './utils/restart';
 
 import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
@@ -50,6 +51,7 @@ const makeDefaultObjects = (): TrackedObject[] =>
     initialRoi: null,
     initialTime: null,
     seed: null,
+    checkpoint: null,
   }));
 
 /** 記録データを React state に反映する最小間隔 (ms)。
@@ -237,6 +239,7 @@ export const App: React.FC = () => {
           ? {
               ...o, active: true, status: 'idle' as ObjectStatus,
               roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
+              checkpoint: null,
             }
           : o
       )
@@ -256,6 +259,7 @@ export const App: React.FC = () => {
           ? {
               ...o, active: false, status: 'idle' as ObjectStatus,
               roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
+              checkpoint: null,
             }
           : o
       )
@@ -329,6 +333,10 @@ export const App: React.FC = () => {
                 // 「やり直し」はここへ戻す（roi は追跡中に上書きされるため）。
                 initialRoi: roi,
                 initialTime: videoEl ? videoEl.currentTime : null,
+                // 枠を引き直したら、中断点は捨てる。新しい枠で
+                // 最初から走らせるという意思表示なので、古い再開点を
+                // 残すと「引いた枠と走り出す位置が違う」状態になる。
+                checkpoint: null,
                 // 初速ヒントは、同じコマで置き直すだけなら生きている。
                 // 「滑るので枠を広げる」のときに測った初速まで捨ててしまうと、
                 // せっかく人が指した 2 点が無駄になる。別のコマへ移ったときだけ捨てる。
@@ -453,19 +461,23 @@ export const App: React.FC = () => {
       objId: string, point: Point, fileTime: number, videoEl?: HTMLVideoElement
     ): SeedResult => {
       const obj = objectsRef.current.find(o => o.id === objId);
-      if (!obj || !obj.initialRoi || obj.initialTime === null) {
+      // 起点は「いま走り出す地点」。中断から再開するときは中断点が起点で、
+      // 最初に引いた枠ではない。何百コマ前の位置から移動量を測ると、
+      // 初速が桁違いになる。
+      const origin = obj ? originOf(obj) : null;
+      if (!obj || !origin) {
         return { msg: '先に枠を置いてください' };
       }
       const fps = Math.max(1, fpsSettings.value);
-      const frames = Math.round((fileTime - obj.initialTime) * fps);
+      const frames = Math.round((fileTime - origin.time) * fps);
       if (frames < 1) return { msg: 'コマを送ってから指してください' };
 
       // 起点は「枠を置いた位置」。center は追跡中に上書きされるので、
       // 一度走らせたあとに初速を教えると、最後に到達した位置から測って
       // しまう。数 px の精度差より、こちらのほうがはるかに重い。
       const from = {
-        x: obj.initialRoi.x + obj.initialRoi.width / 2,
-        y: obj.initialRoi.y + obj.initialRoi.height / 2,
+        x: origin.roi.x + origin.roi.width / 2,
+        y: origin.roi.y + origin.roi.height / 2,
       };
       const perFrame = {
         x: (point.x - from.x) / frames,
@@ -482,7 +494,7 @@ export const App: React.FC = () => {
       // 対象は自分の直径以上に流れて写り、照合の中心は対象の中心ではなくなる。
       // ここだけは走らせる前に止める（全コマ処理の待ち時間が無駄になるため）。
       const step = Math.hypot(perFrame.x, perFrame.y);
-      const size = Math.min(obj.initialRoi.width, obj.initialRoi.height) * 0.8;
+      const size = Math.min(origin.roi.width, origin.roi.height) * 0.8;
       if (step > size) {
         return {
           msg: `1 コマで ${step.toFixed(0)}px 動いています。対象より大きいので、`
@@ -580,7 +592,7 @@ export const App: React.FC = () => {
       flushHistory(true);
 
       const obj = objectsRef.current.find(o => o.id === objId);
-      const base = obj?.initialRoi ?? obj?.roi;
+      const base = obj ? sizeOf(obj) : null;
       if (!trackersRef.current[objId] && base && cvRef.current && cvReady && videoEl) {
         const half = { w: base.width / 2, h: base.height / 2 };
         const roi: Rect = {
@@ -648,15 +660,14 @@ export const App: React.FC = () => {
           x: (last.point.x - prev.point.x) / frames,
           y: (last.point.y - prev.point.y) / frames,
         };
-        const base = obj.initialRoi ?? obj.roi;
+        // 枠の大きさは最初に引いたものをそのまま使う。固定カメラで
+        // 平面内の運動を撮っているので、見かけの大きさは変わらない。
+        const base = sizeOf(obj);
         if (!base) return;
-        const roi: Rect = {
-          x: Math.round(last.point.x - base.width / 2),
-          y: Math.round(last.point.y - base.height / 2),
-          width: Math.round(base.width),
-          height: Math.round(base.height),
-        };
-        next.set(obj.id, { roi, seed: { point: last.point, time: last.time, perFrame } });
+        const cp = makeCheckpoint(
+          base, last.point, last.time, { point: last.point, time: last.time, perFrame }
+        );
+        next.set(obj.id, { roi: cp.roi, seed: cp.seed! });
 
         if (!src || !cvRef.current) return;
         try {
@@ -689,7 +700,7 @@ export const App: React.FC = () => {
           // 作り直す場所が「難しい場面の先」になるのが肝。衝突やブレの
           // 瞬間を自動で越えさせる必要がなくなる。
           const t = new ObjectTracker(cvRef.current, obj.id, trackingRef.current);
-          if (t.init(src, roi)) {
+          if (t.init(src, cp.roi)) {
             t.setSeedVelocity(perFrame);
             trackersRef.current[obj.id]?.cleanup();
             trackersRef.current[obj.id] = t;
@@ -711,8 +722,10 @@ export const App: React.FC = () => {
           roi: n.roi,
           center: n.seed.point,
           status: 'idle' as ObjectStatus,
-          initialRoi: n.roi,
-          initialTime: n.seed.time,
+          // initialRoi / initialTime は触らない。ここを上書きすると
+          // 「最初に引いた枠」が失われ、やり直しが中断位置の枠を
+          // 区間の始点に置く、という食い違った状態になる。
+          checkpoint: { roi: n.roi, time: n.seed.time, seed: n.seed },
           seed: n.seed,
         };
       }));
@@ -878,6 +891,7 @@ export const App: React.FC = () => {
       prev.map(o => ({
         ...o, status: 'idle' as ObjectStatus,
         roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
+              checkpoint: null,
       }))
     );
   }, []);
@@ -944,7 +958,7 @@ export const App: React.FC = () => {
     setObjects(prev => prev.map(o => {
       // 初期位置を覚えていない（手動記録だけで使った）場合は今の枠のまま
       const base = o.initialRoi ?? o.roi;
-      if (!base) return o;
+      if (!base) return { ...o, checkpoint: null };
       const p = backTo.get(o.id) ?? null;
       // 戻る先のコマでの位置が分かるなら、枠の大きさは変えずにそこへ移す。
       // 初期位置も一緒に更新する。更新しないと、次のやり直しでまた
@@ -962,6 +976,9 @@ export const App: React.FC = () => {
         status: 'idle' as ObjectStatus,
         roi,
         center: null,
+        // 中断点は捨てる。やり直しは「最初から」なので、
+        // 止まった地点の情報を持ち越してはいけない。
+        checkpoint: null,
         ...(p && restartAt != null
           ? { initialRoi: roi, initialTime: restartAt, seed: seedAt.get(o.id) ?? null }
           : {}),
@@ -1000,31 +1017,25 @@ export const App: React.FC = () => {
     trackersRef.current = {};
 
     setObjects(prev => prev.map(o => {
-      const base = o.initialRoi ?? o.roi;
+      const base = sizeOf(o);
       if (!base || lastTime === null) {
         return { ...o, status: 'idle' as ObjectStatus, center: null };
       }
       const p = trackedPointAt(kept, o.id, lastTime, tol * 3);
-      const roi: Rect = p
-        ? {
-            x: p.x - base.width / 2,
-            y: p.y - base.height / 2,
-            width: base.width,
-            height: base.height,
-          }
-        : base;
+      if (!p) {
+        return { ...o, status: 'idle' as ObjectStatus, roi: base, center: null };
+      }
+      // 残した最後のコマを中断点にする。initialRoi はユーザーが
+      // 引いた枠のままにしておく（やり直しはそこへ戻る）。
+      const seed = trackedStepAt(kept, o.id, lastTime, tol * 3);
+      const cp = makeCheckpoint(base, p, lastTime, seed);
       return {
         ...o,
         status: 'idle' as ObjectStatus,
-        roi,
+        roi: cp.roi,
         center: null,
-        ...(p
-          ? {
-              initialRoi: roi,
-              initialTime: lastTime,
-              seed: trackedStepAt(kept, o.id, lastTime, tol * 3),
-            }
-          : {}),
+        checkpoint: cp,
+        seed,
       };
     }));
     setHalt(null);
@@ -1138,7 +1149,7 @@ export const App: React.FC = () => {
                 res.center.x - obj.seed.point.x,
                 res.center.y - obj.seed.point.y
               );
-              const base0 = obj.initialRoi;
+              const base0 = originOf(obj)?.roi ?? null;
               const travel = base0
                 ? Math.hypot(
                     obj.seed.point.x - (base0.x + base0.width / 2),

@@ -42,6 +42,7 @@ import { timeScale } from '../utils/timeScale';
 import { drawCrosshair, drawCalibPoint } from '../utils/overlay';
 import { checkTrack } from '../utils/frameCheck';
 import { pointsBefore, TrailPoint } from '../utils/trailEdit';
+import { originOf, sizeOf } from '../utils/restart';
 import { narrowerSearchScale, slowerRate, rateLabel } from '../utils/advice';
 import { SEED_FRAMES } from '../types';
 import {
@@ -519,14 +520,15 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   const startSeed = useCallback(async () => {
     const v = videoRef.current;
     const o = objects.find(x => x.id === selectedObjId);
-    if (!v || !o || o.initialTime === null) return;
+    const org = o ? originOf(o) : null;
+    if (!v || !o || !org) return;
     v.pause();
     setIsPlaying(false);
     setOriginMode(false);
     setCorrectMode(false);
     setManualMode(false);
     setIsLineCalibrating(false);
-    const target = o.initialTime + SEED_FRAMES / Math.max(1, fpsSettings.value);
+    const target = org.time + SEED_FRAMES / Math.max(1, fpsSettings.value);
     try {
       const t = await seekToFrameTime(v, target);
       frameTimeRef.current = t;
@@ -955,13 +957,14 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   useEffect(() => {
     if (!bridgeMode) { setBridgeCount(0); return; }
     const o = objects.find(x => x.id === selectedObjId);
-    if (!o || o.initialTime === null) return;
+    const org = o ? originOf(o) : null;
+    if (!o || !org) return;
     setIsLineCalibrating(false);
     setOriginMode(false);
     setSeedMode(false);
     setManualMode(false);
     setCorrectMode(false);
-    void seekTo(o.initialTime + 1 / Math.max(1, fpsSettings.value));
+    void seekTo(org.time + 1 / Math.max(1, fpsSettings.value));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridgeMode]);
 
@@ -1187,7 +1190,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
   /** 点検に使う枠の幅。ブレの限界の判定に効く */
   const checkRoiWidth = useMemo(() => {
     const o = objects.find(x => x.id === selectedObjId);
-    return o?.initialRoi?.width ?? o?.roi?.width ?? 0;
+    return (o ? sizeOf(o)?.width : 0) ?? 0;
   }, [objects, selectedObjId]);
 
   const trackQuality = useMemo(
@@ -1428,10 +1431,11 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
     // ----- 初速ヒントを引いている最中の矢印 -----
     if (dragMode === 'seed' && dragCurrent) {
       const o = objects.find(x => x.id === selectedObjId);
-      const from = o?.initialRoi
+      const org0 = o ? originOf(o) : null;
+      const from = org0
         ? {
-            x: o.initialRoi.x + o.initialRoi.width / 2,
-            y: o.initialRoi.y + o.initialRoi.height / 2,
+            x: org0.roi.x + org0.roi.width / 2,
+            y: org0.roi.y + org0.roi.height / 2,
           }
         : null;
       if (from) {
@@ -1468,10 +1472,11 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
       if (!obj.active || !obj.seed || obj.id !== selectedObjId) return;
       ctx.save();
       ctx.globalAlpha = 0.75;
-      if (obj.initialRoi) {
+      const orgS = originOf(obj);
+      if (orgS) {
         const from = {
-          x: obj.initialRoi.x + obj.initialRoi.width / 2,
-          y: obj.initialRoi.y + obj.initialRoi.height / 2,
+          x: orgS.roi.x + orgS.roi.width / 2,
+          y: orgS.roi.y + orgS.roi.height / 2,
         };
         ctx.beginPath();
         ctx.moveTo(from.x, from.y);
@@ -2466,7 +2471,7 @@ export const VideoCanvas: React.FC<VideoCanvasProps> = ({
                   setSeedMsg(null);
                   // 中心は今の枠の中心。大きさだけ測った値へ置き換える
                   const o = objects.find(x => x.id === selectedObjId);
-                  const base = o?.initialRoi ?? o?.roi;
+                  const base = o ? sizeOf(o) : null;
                   if (base) {
                     setRoiCenter({
                       x: base.x + base.width / 2,
