@@ -31,7 +31,8 @@
 //   暗い対象の上に白点があるようなケース向けの任意機能とした。
 // ============================================================
 
-import { Rect, Point, TrackingSettings, MarkerMode } from '../types';
+import { Rect, Point, TrackingSettings, MarkerMode, ColorKey,
+} from '../types';
 import { FrameSource, RegionSample } from './frameSource';
 
 export type TrackState = 'ok' | 'lost' | 'exited';
@@ -154,6 +155,14 @@ export class ObjectTracker {
   /** 直前のコマで実際に探した半径 [px]（表示用） */
   private lastSearchPx = 0;
   private cfg: TrackingSettings;
+  /**
+   * 彩度で絞る鍵。null なら素の輝度で照合する。
+   *
+   * 照合に渡る画を差し替えるだけなので、この先の仕組み
+   * （等速度予測・適応探索窓・サブピクセル補間・縁判定・
+   * 枠の切れ味測定）はどれも鍵の有無を知らない。
+   */
+  private key: ColorKey | null = null;
 
   /** 重心計算に使う局所窓の半径 */
   private half = 8;
@@ -178,6 +187,21 @@ export class ObjectTracker {
 
   public setConfig(cfg: TrackingSettings) {
     this.cfg = cfg;
+  }
+
+  /**
+   * 彩度の鍵を渡す。init の前に呼ぶ（テンプレートも鍵を通した画から作る）。
+   * 設定で切られているときは鍵を持たせない。
+   */
+  public setColorKey(key: ColorKey | null) {
+    this.key = key;
+  }
+
+  /** 鍵を通した画素を取る。getRegion はここだけを通す */
+  private region(
+    src: FrameSource, x: number, y: number, w: number, h: number
+  ): RegionSample | null {
+    return src.getRegion(x, y, w, h, this.key);
   }
 
   public getState(): TrackState {
@@ -215,7 +239,7 @@ export class ObjectTracker {
       return false;
     }
 
-    const region = src.getRegion(x, y, w, h);
+    const region = this.region(src, x, y, w, h);
     if (!region) return false;
 
     // 後から枠を広げて試せるように、周辺を広めに取っておく。
@@ -223,7 +247,7 @@ export class ObjectTracker {
     const span = Math.min(480, Math.max(w, h) * 4);
     const hx = Math.round(x + w / 2 - span / 2);
     const hy = Math.round(y + h / 2 - span / 2);
-    this.home = src.getRegion(hx, hy, span, span);
+    this.home = this.region(src, hx, hy, span, span);
     if (this.home) {
       this.homeCx = x + w / 2 - this.home.x0;
       this.homeCy = y + h / 2 - this.home.y0;
@@ -310,7 +334,8 @@ export class ObjectTracker {
     // 探索窓は指した点が中心。人の指し間違いを吸収できるだけの広さにする
     const margin = Math.max(8, Math.round(tw * 0.5));
     const sw = tw + margin * 2;
-    const region = src.getRegion(
+    const region = this.region(
+      src,
       Math.round(at.x) - tw / 2 - margin,
       Math.round(at.y) - tw / 2 - margin,
       sw, sw
@@ -539,7 +564,7 @@ export class ObjectTracker {
     const sw = Math.ceil(this.tw + margin * 2);
     const sh = Math.ceil(this.th + margin * 2);
 
-    const region = src.getRegion(sx0, sy0, sw, sh);
+    const region = this.region(src, sx0, sy0, sw, sh);
     if (!region || region.width < this.tw || region.height < this.th) {
       // 探索窓がテンプレートより小さい＝画面端に張り付いている
       return 'exited';

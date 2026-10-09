@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   TrackedObject, ScaleCalibration, FilterSettings,
   FrameData, Rect, FpsSettings, TrackingSettings,
-  DEFAULT_TRACKING, ObjectStatus, Point, SeedHint, HaltInfo, SeedResult,
+  DEFAULT_TRACKING, ObjectStatus, Point, SeedHint, HaltInfo, SeedResult, ColorKey,
 } from './types';
 import { waitForOpenCV } from './utils/opencvLoader';
 import { ObjectTracker, MIN_ROI_SIZE, RECOMMENDED_ROI_SIZE, SLIDE_SHARPNESS } from './utils/tracker';
@@ -20,6 +20,7 @@ import {
 import { recentStep } from './utils/frameCheck';
 import { truncateAfter, dropPointAt, clearSuspect, pointsBefore } from './utils/trailEdit';
 import { originOf, sizeOf, makeCheckpoint } from './utils/restart';
+import { measureColorKey } from './utils/colorKey';
 
 import { Header } from './components/Header';
 import { VideoCanvas } from './components/VideoCanvas';
@@ -52,6 +53,7 @@ const makeDefaultObjects = (): TrackedObject[] =>
     initialTime: null,
     seed: null,
     checkpoint: null,
+    colorKey: null,
   }));
 
 /** 記録データを React state に反映する最小間隔 (ms)。
@@ -208,6 +210,18 @@ export const App: React.FC = () => {
     Object.values(trackersRef.current).forEach(t => t.setConfig(tracking));
   }, [tracking]);
 
+  /**
+   * 彩度で絞るかの入切は、テンプレートを作り直さないと効かない。
+   * テンプレートは「鍵を通した画」から作られているので、途中で鍵だけ
+   * 差し替えると、別の画から作ったテンプレートで探すことになる。
+   * トラッカーを捨てて、次のコマで枠の位置から作り直させる。
+   */
+  useEffect(() => {
+    Object.values(trackersRef.current).forEach(t => t.cleanup());
+    trackersRef.current = {};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracking.useColorKey]);
+
   // -------------------------------------------------
   // 記録データのフラッシュ
   // -------------------------------------------------
@@ -239,7 +253,7 @@ export const App: React.FC = () => {
           ? {
               ...o, active: true, status: 'idle' as ObjectStatus,
               roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
-              checkpoint: null,
+              checkpoint: null, colorKey: null,
             }
           : o
       )
@@ -259,7 +273,7 @@ export const App: React.FC = () => {
           ? {
               ...o, active: false, status: 'idle' as ObjectStatus,
               roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
-              checkpoint: null,
+              checkpoint: null, colorKey: null,
             }
           : o
       )
@@ -294,11 +308,21 @@ export const App: React.FC = () => {
         return;
       }
 
+      let nextKey: ColorKey | null = null;
+      let keyMsg = '';
       if (cvRef.current && cvReady && videoEl) {
         const cv = cvRef.current;
         try {
           const src = getFrameSource();
           if (src.capture(videoEl)) {
+            // ---- 彩度の鍵を、テンプレートを作る前に実測する ----
+            // 枠の内側と、探索窓が届く範囲の彩度を比べる。向きは測って
+            // 決める（白シールは周囲より低く、赤球は高い）。
+            const cap = Math.max(roi.width, roi.height) * trackingRef.current.searchScale;
+            const km = measureColorKey(src, roi, cap);
+            keyMsg = km.msg;
+            nextKey = km.key;
+
             let tracker = trackersRef.current[objId];
             if (!tracker) {
               tracker = new ObjectTracker(cv, objId, trackingRef.current);
@@ -306,6 +330,7 @@ export const App: React.FC = () => {
             } else {
               tracker.setConfig(trackingRef.current);
             }
+            tracker.setColorKey(trackingRef.current.useColorKey ? nextKey : null);
             if (!tracker.init(src, roi)) {
               setNotice(`${objId} の追跡を開始できませんでした。枠を大きめに取り直してください。`);
               return;
@@ -337,6 +362,7 @@ export const App: React.FC = () => {
                 // 最初から走らせるという意思表示なので、古い再開点を
                 // 残すと「引いた枠と走り出す位置が違う」状態になる。
                 checkpoint: null,
+                colorKey: nextKey,
                 // 初速ヒントは、同じコマで置き直すだけなら生きている。
                 // 「滑るので枠を広げる」のときに測った初速まで捨ててしまうと、
                 // せっかく人が指した 2 点が無駄になる。別のコマへ移ったときだけ捨てる。
@@ -349,6 +375,8 @@ export const App: React.FC = () => {
             : o
         )
       );
+
+      if (keyMsg) setNotice(keyMsg);
 
       // boxモードのスケール校正: 基準オブジェクトの枠幅から pxPerUnit を計算
       setCalibration(prevCalib => {
@@ -539,6 +567,31 @@ export const App: React.FC = () => {
                   + `模様のある部分が入るように囲んでください。`,
               };
             }
+            // ---- 彩度の分離が、このコマでも成り立つかを確かめる ----
+            // 枠を置いた 1 コマで測った鍵は、そのコマの照明と背景にしか
+            // 保証がない。対象が動いた先で成り立たなくなっていれば、
+            // 走らせる前に言えるのはここしかない。
+            if (obj.colorKey && trackingRef.current.useColorKey) {
+              const roiHere: Rect = {
+                x: Math.round(point.x - origin.roi.width / 2),
+                y: Math.round(point.y - origin.roi.height / 2),
+                width: origin.roi.width,
+                height: origin.roi.height,
+              };
+              const cap = Math.max(roiHere.width, roiHere.height)
+                * trackingRef.current.searchScale;
+              const km2 = measureColorKey(src, roiHere, cap);
+              if (!km2.key) {
+                return {
+                  msg: `彩度での絞り込みは、このコマでは成り立っていません`
+                    + `（対象 ${Math.round(km2.targetMid)}／`
+                    + `周囲 ${Math.round(km2.surroundMid)}）。`
+                    + `背景が変わる区間では外れます。暴れたら、`
+                    + `追跡の精度設定でしきい値を動かすか、彩度での絞り込みを`
+                    + `切ってください。`,
+                };
+              }
+            }
           }
         } catch (err) {
           console.error('[App] 枠の測定に失敗:', err);
@@ -603,6 +656,7 @@ export const App: React.FC = () => {
           const src = getFrameSource();
           if (src.capture(videoEl)) {
             const t = new ObjectTracker(cvRef.current, objId, trackingRef.current);
+            t.setColorKey(trackingRef.current.useColorKey ? obj?.colorKey ?? null : null);
             // ここへ来るのはトラッカーが無いときだけなので、片付けは要らない
             if (t.init(src, roi)) trackersRef.current[objId] = t;
           }
@@ -700,6 +754,7 @@ export const App: React.FC = () => {
           // 作り直す場所が「難しい場面の先」になるのが肝。衝突やブレの
           // 瞬間を自動で越えさせる必要がなくなる。
           const t = new ObjectTracker(cvRef.current, obj.id, trackingRef.current);
+          t.setColorKey(trackingRef.current.useColorKey ? obj.colorKey : null);
           if (t.init(src, cp.roi)) {
             t.setSeedVelocity(perFrame);
             trackersRef.current[obj.id]?.cleanup();
@@ -766,6 +821,7 @@ export const App: React.FC = () => {
           const src = getFrameSource();
           if (src.capture(videoEl)) {
             const tracker = new ObjectTracker(cvRef.current, objId, trackingRef.current);
+            tracker.setColorKey(trackingRef.current.useColorKey ? obj?.colorKey ?? null : null);
             if (tracker.init(src, roi)) {
               trackersRef.current[objId]?.cleanup();
               trackersRef.current[objId] = tracker;
@@ -875,6 +931,18 @@ export const App: React.FC = () => {
     setTimeRange(normalizeRange(r));
   }, []);
 
+  /**
+   * 彩度のしきい値を手で動かす。
+   *
+   * テンプレートは鍵を通した画から作られているので、鍵を変えたら
+   * 作り直さないといけない。そのオブジェクトのトラッカーだけ捨てる。
+   */
+  const handleUpdateColorKey = useCallback((id: string, key: ColorKey) => {
+    setObjects(prev => prev.map(o => (o.id === id ? { ...o, colorKey: key } : o)));
+    trackersRef.current[id]?.cleanup();
+    delete trackersRef.current[id];
+  }, []);
+
   // -------------------------------------------------
   // データリセット
   // -------------------------------------------------
@@ -891,7 +959,7 @@ export const App: React.FC = () => {
       prev.map(o => ({
         ...o, status: 'idle' as ObjectStatus,
         roi: null, center: null, initialRoi: null, initialTime: null, seed: null,
-              checkpoint: null,
+              checkpoint: null, colorKey: null,
       }))
     );
   }, []);
@@ -1118,6 +1186,7 @@ export const App: React.FC = () => {
             let tracker = trackersRef.current[obj.id];
             if (!tracker) {
               tracker = new ObjectTracker(cv, obj.id, cfg);
+              tracker.setColorKey(cfg.useColorKey ? obj.colorKey : null);
               if (!tracker.init(src, obj.roi)) return;
               // やり直しのあとはここで作り直されるので、初速ヒントを渡し直す
               if (obj.seed) tracker.setSeedVelocity(obj.seed.perFrame);
@@ -1385,6 +1454,7 @@ export const App: React.FC = () => {
             onUpdateCalibration={setCalibration}
             tracking={tracking}
             onUpdateTracking={setTracking}
+            onUpdateColorKey={handleUpdateColorKey}
             fpsSettings={fpsSettings}
             onUpdateFpsSettings={setFpsSettings}
             isLineCalibrating={isLineCalibrating}

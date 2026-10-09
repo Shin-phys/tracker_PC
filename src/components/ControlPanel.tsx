@@ -16,7 +16,7 @@
 import React from 'react';
 import {
   TrackedObject, ScaleCalibration, FpsSettings, TrackingSettings,
-  LengthUnit, MarkerMode, DEFAULT_TRACKING,
+  LengthUnit, MarkerMode, DEFAULT_TRACKING, ColorKey,
 } from '../types';
 import {
   recalcScale, convertValue, pixelDistance, fmt,
@@ -24,6 +24,7 @@ import {
   calibrationAdvice, calibrationGrade, referenceLengthPx,
 } from '../utils/calibration';
 import { RECOMMENDED_ROI_SIZE } from '../utils/tracker';
+import { describeKey } from '../utils/colorKey';
 import {
   CAPTURE_FPS_PRESETS, describeTimeScale, isTimeScaled, durationCheck,
 } from '../utils/timeScale';
@@ -43,6 +44,8 @@ interface ControlPanelProps {
   onUpdateCalibration: (calib: ScaleCalibration) => void;
   tracking: TrackingSettings;
   onUpdateTracking: (t: TrackingSettings) => void;
+  /** 彩度の鍵のしきい値を手で動かす */
+  onUpdateColorKey: (id: string, key: ColorKey) => void;
   fpsSettings: FpsSettings;
   onUpdateFpsSettings: (fps: FpsSettings) => void;
   /** 動画の長さ [s] */
@@ -91,6 +94,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   onUpdateCalibration,
   tracking,
   onUpdateTracking,
+  onUpdateColorKey,
   fpsSettings,
   onUpdateFpsSettings,
   videoDuration = 0,
@@ -100,6 +104,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
   videoHeight,
 }) => {
   const activeObjects = objects.filter(o => o.active);
+  const selected = objects.find(o => o.id === selectedObjId);
+  const selKey = selected?.colorKey ?? null;
   const lostObjects = activeObjects.filter(o => o.status === 'lost');
   const exitedObjects = activeObjects.filter(o => o.status === 'exited');
   const needsAttention = [...lostObjects, ...exitedObjects];
@@ -910,6 +916,50 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                 <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>{s.hint}</div>
               </div>
             ))}
+
+            {/* ---- 彩度で絞る ---- */}
+            <div style={{ borderTop: '1px solid var(--border)', paddingTop: '10px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                <input type="checkbox" checked={tracking.useColorKey}
+                  onChange={e => onUpdateTracking({ ...tracking, useColorKey: e.target.checked })}
+                  style={{ width: 14, height: 14, accentColor: 'var(--accent-primary)' }} />
+                彩度で絞る
+              </label>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                彩度が合わない画素を照合から外します。周囲の模様が消えるので、
+                似た明るさのものに乗り移りにくくなります。向きは枠を置いたときに実測します。
+              </div>
+              {tracking.useColorKey && (
+                selKey ? (
+                  <div style={{ marginTop: '8px' }}>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                      {describeKey(selKey)}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                      <span>彩度のしきい値</span>
+                      <span className="mono" style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
+                        {Math.round(selKey.thr)}
+                      </span>
+                    </div>
+                    <input type="range" min={0} max={255} step={1} value={Math.round(selKey.thr)}
+                      onChange={e => onUpdateColorKey(
+                        selectedObjId, { ...selKey, thr: parseInt(e.target.value, 10) }
+                      )}
+                      style={{ width: '100%' }} />
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                      暴れるときは、対象だけが残る側へ寄せてください。動かすと
+                      テンプレートを作り直すので、やり直してから再生します。
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '8px' }}>
+                    {selected?.initialRoi
+                      ? 'この枠では彩度で分けられませんでした。輝度だけで追跡しています。'
+                      : '枠を置くと、対象と周囲の彩度を測ります。'}
+                  </div>
+                )
+              )}
+            </div>
 
             <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', cursor: 'pointer', color: 'var(--text-secondary)' }}>
               <input type="checkbox" checked={tracking.stopOnExit}

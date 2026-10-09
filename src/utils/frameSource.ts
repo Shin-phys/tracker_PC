@@ -15,6 +15,9 @@
 // とすることで、実測で 20〜40 倍の高速化になる。
 // ------------------------------------------------------------
 
+import { ColorKey } from '../types';
+import { membership, satOf } from './colorKey';
+
 export interface RegionSample {
   /** 切り出し領域の左上（フレーム座標） */
   x0: number;
@@ -55,8 +58,17 @@ export class FrameSource {
     return true;
   }
 
-  /** 指定矩形を切り出してグレースケール＋RGBAを返す（矩形はフレーム内にクランプ済み） */
-  public getRegion(x0: number, y0: number, w: number, h: number): RegionSample | null {
+  /**
+   * 指定矩形を切り出してグレースケール＋RGBAを返す（矩形はフレーム内にクランプ済み）。
+   *
+   * key を渡すと、gray が「彩度が鍵に合う画素だけ輝度を残し、合わない画素は 0」
+   * に差し替わる。照合に渡る画が変わるだけなので、等速度予測・適応探索窓・
+   * サブピクセル補間・縁判定・テンプレートの切れ味測定は、どれも手を入れずに
+   * そのまま成立する。rgba は素のまま返すので、重心補正も影響を受けない。
+   */
+  public getRegion(
+    x0: number, y0: number, w: number, h: number, key?: ColorKey | null
+  ): RegionSample | null {
     const cx0 = Math.max(0, Math.min(this.width - 1, Math.floor(x0)));
     const cy0 = Math.max(0, Math.min(this.height - 1, Math.floor(y0)));
     const cw = Math.max(1, Math.min(this.width - cx0, Math.ceil(w)));
@@ -69,6 +81,12 @@ export class FrameSource {
     for (let i = 0, j = 0; i < n; i++, j += 4) {
       // ITU-R BT.601 の整数近似（OpenCV の COLOR_RGBA2GRAY と同一）
       gray[i] = (src[j] * 4899 + src[j + 1] * 9617 + src[j + 2] * 1868 + 8192) >> 14;
+    }
+    if (key) {
+      for (let i = 0, j = 0; i < n; i++, j += 4) {
+        const m = membership(satOf(src[j], src[j + 1], src[j + 2]), key);
+        gray[i] = m >= 1 ? gray[i] : (gray[i] * m) | 0;
+      }
     }
     return { x0: cx0, y0: cy0, width: cw, height: ch, gray, rgba: src };
   }
